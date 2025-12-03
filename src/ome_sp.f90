@@ -333,7 +333,12 @@ module ome_sp
 			    	berry_eigen1(2,nn,nnp)=berry_eigen1(2,nn,nnp)+ &
 			      complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(5,ialpha,nn))*skernel(ialpha,ialphap)*aux1			
 				    berry_eigen2(2,nn,nnp)=berry_eigen2(2,nn,nnp)+ &
-				    conjg(hk_ev_neigh(5,ialpha,nn))*hk_ev_neigh(5,ialphap,nnp)*akernel(2,ialpha,ialphap)							
+				    conjg(hk_ev_neigh(5,ialpha,nn))*hk_ev_neigh(5,ialphap,nnp)*akernel(2,ialpha,ialphap)			
+
+            !z-dir
+            berry_eigen1(3,nn,nnp)=0.0d0
+            berry_eigen2(3,nn,nnp)=berry_eigen2(3,nn,nnp)+ & 
+            conjg(hk_ev_neigh(5,ialpha,nn))*hk_ev_neigh(5,ialphap,nnp)*akernel(3,ialpha,ialphap)				
 		      end do
 		    end do
 		    do nj=1,3	

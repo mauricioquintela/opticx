@@ -297,7 +297,7 @@ module sigma_second_sp
     real*8 :: feps
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
     !write frequency dependent conductivity	  
-    open(90,file='shift_sp_shiftvector_'//trim(material_name)//'.dat')
+    open(90,file='shift_sp_lengthgauge_'//trim(material_name)//'.dat')
     open(100,file='shift_vector.dat')
     do iw=1,nw
       !feps=-6.623618d-03/(27.21138**2)*1.0d06 !%go from au to (\mu A /V^2)*Angstrongs
@@ -305,12 +305,18 @@ module sigma_second_sp
       !d=3.28d0 !thickness in angstrongs for h-BN
       !feps=feps/(d/0.52917721067121d0) 
       feps=(6.623618d-03)*(1.0d+06)*(27.211386**(-2))*(5.291772d-11)*(1.0d+09) !%go from au to (\mu A /V^2)*nm	
-      write(90,*) wp(iw)*27.211385d0,realpart(feps*sigma_w_sp(1,1,1,iw)), &
-		         realpart(feps*sigma_w_sp(1,2,2,iw)), &
-		         realpart(feps*sigma_w_sp(2,1,1,iw)), &
-		  	     realpart(feps*sigma_w_sp(2,2,2,iw)) 	    
-      write(100,*) wp(iw)*27.211385d0,shift_vector_w(1,1,iw),shift_vector_w(1,2,iw), &
-               shift_vector_w(2,1,iw),shift_vector_w(2,2,iw)
+      write(90,*) wp(iw)*27.211385d0,&
+            realpart(feps*sigma_w_sp(1,1,1,iw)), &
+		        realpart(feps*sigma_w_sp(1,2,2,iw)), &
+		        realpart(feps*sigma_w_sp(2,1,1,iw)), &
+		  	    realpart(feps*sigma_w_sp(2,2,2,iw)), & 
+            realpart(feps*sigma_w_sp(1,1,3,iw)), &
+		        realpart(feps*sigma_w_sp(2,2,3,iw)), &
+		        realpart(feps*sigma_w_sp(3,1,1,iw)), &
+		  	    realpart(feps*sigma_w_sp(3,2,2,iw)) 	    
+      write(100,*) wp(iw)*27.211385d0,&
+            shift_vector_w(1,1,iw),shift_vector_w(1,2,iw), &
+            shift_vector_w(2,1,iw),shift_vector_w(2,2,iw)
     end do
     close(90)
     close(95)

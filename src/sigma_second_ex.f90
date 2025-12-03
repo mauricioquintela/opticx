@@ -279,10 +279,15 @@ module sigma_second_ex
       !d=3.28d0 !thickness in angstrongs for h-BN
       !feps=feps/(d/0.52917721067121d0) 
       feps=(6.623618d-03)*(1.0d+06)*(27.211386**(-2))*(5.291772d-11)*(1.0d+09) !%go from au to (\mu A /V^2)*nm	
-      write(90,*) wp(iw)*27.211385d0,realpart(feps*sigma_w_ex(1,1,1,iw)), &
-		         realpart(feps*sigma_w_ex(1,2,2,iw)), &
-		         realpart(feps*sigma_w_ex(2,1,1,iw)), &
-		  	     realpart(feps*sigma_w_ex(2,2,2,iw)) 	    
+      write(90,*) wp(iw)*27.211385d0,&
+            realpart(feps*sigma_w_ex(1,1,1,iw)), &
+		    realpart(feps*sigma_w_ex(1,2,2,iw)), &
+		    realpart(feps*sigma_w_ex(2,1,1,iw)), &
+		  	realpart(feps*sigma_w_ex(2,2,2,iw)), & 
+            realpart(feps*sigma_w_ex(1,1,3,iw)), &
+		    realpart(feps*sigma_w_ex(2,2,3,iw)), &
+		    realpart(feps*sigma_w_ex(3,1,1,iw)), &
+		  	realpart(feps*sigma_w_ex(3,2,2,iw)) 	    
     end do
     close(90)
 

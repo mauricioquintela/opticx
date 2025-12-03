@@ -136,7 +136,8 @@ module sigma_first_ex
 
     do iw=1,nw
       feps=1.0d0 !use atomic units
-      write(50,*) wp(iw)*27.211385d0,realpart(feps*sigma_w_ex(1,1,iw)), &
+      write(50,*) wp(iw)*27.211385d0, &
+        realpart(feps*sigma_w_ex(1,1,iw)), &
         realpart(feps*sigma_w_ex(1,2,iw)), &
         realpart(feps*sigma_w_ex(1,3,iw)), &
         realpart(feps*sigma_w_ex(2,1,iw)), &
