@@ -1,7 +1,7 @@
 module sigma_first_sp
   use constants_math
   use parser_input_file, &
-  only:iflag_xatu,nf,e1,e2,eta,nw
+  only:iflag_xatu,nf,e1,e2,eta,nw,broadening_type_text
   use parser_wannier90_tb, &
   only:material_name,norb
   use parser_optics_xatu_dim, &
@@ -176,8 +176,17 @@ module sigma_first_sp
           else
             factor1=(fnn-fnnp)/(e(nn)-e(nnp))
           end if
-	        !gaussian broadening. Only real part of delta function is implemented!
-	        delta_nnp=-1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta1**2)*(wp(iw)-e(nn)+e(nnp))**2)  
+          ! Broadening: gaussian or lorentzian based on parser input
+          if (trim(broadening_type_text) == 'gaussian') then
+            delta_nnp = -1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*&
+              exp(-0.5d0/(eta1**2)*(wp(iw)-e(nn)+e(nnp))**2)
+          else if (trim(broadening_type_text) == 'lorentzian') then
+            delta_nnp = 1.0d0/pi*aimag(1.0d0/(-wp(iw)+e(nn)-e(nnp)+&
+              complex(0.0d0,eta1)))
+          else
+            delta_nnp = -1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*&
+              exp(-0.5d0/(eta1**2)*(wp(iw)-e(nn)+e(nnp))**2)
+          end if
 
           !save oscillator stregths
           do nj=1,3

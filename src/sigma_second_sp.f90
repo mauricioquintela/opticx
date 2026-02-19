@@ -1,7 +1,7 @@
 module sigma_second_sp
   use constants_math
   use parser_input_file, &
-  only:nf,e1,e2,eta,nw,response_text
+  only:nf,e1,e2,eta,nw,response_text,broadening_type_text
   use parser_wannier90_tb, &
   only:material_name
   use parser_optics_xatu_dim, &
@@ -198,9 +198,17 @@ module sigma_second_sp
           else
             fnnp=0.0d0
           end if   
-  	      factor1=fnn-fnnp			
-          !delta_nnp=1.0d0/pi*aimag(1.0d0/(wp(iw)-e(nn)+e(nnp)-complex(0.0d0,eta)))			    
-          delta_nnp=1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(wp(iw)-e_nband(nn)+e_nband(nnp))**2)
+  	      factor1=fnn-fnnp
+          if (trim(broadening_type_text) == 'gaussian') then
+            delta_nnp = 1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*&
+              exp(-0.5d0/(eta2**2)*(wp(iw)-e_nband(nn)+e_nband(nnp))**2)
+          else if (trim(broadening_type_text) == 'lorentzian') then
+            delta_nnp = 1.0d0/pi*aimag(1.0d0/(wp(iw)-e_nband(nn)+&
+              e_nband(nnp)-complex(0.0d0,eta2)))
+          else
+            delta_nnp = 1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*&
+              exp(-0.5d0/(eta2**2)*(wp(iw)-e_nband(nn)+e_nband(nnp))**2)
+          end if
   	      do nj=1,3
   	        do njp=1,3		
   		        shift_vector_w(nj,njp,iw)=shift_vector_w(nj,njp,iw)+ &
