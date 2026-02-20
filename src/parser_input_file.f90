@@ -34,18 +34,14 @@ module parser_input_file
   logical :: iflag_ome_sp
   logical :: iflag_ome_ex
 
-  integer :: nk1
   integer :: ndim
   integer :: nf
   integer :: npointstotal_sq
-  integer :: nband_index_aux 
   integer :: norb_ex_cut
-  integer :: j !to read stuff
   integer :: nband_index
   integer :: nw
   real(8) :: e1,e2,eta
 
-  dimension :: nband_index_aux(100) !auxiliary array to save band indeces
   allocatable :: nband_index(:)
 
   contains
@@ -68,7 +64,7 @@ module parser_input_file
     subroutine get_input_file()
       implicit none
       integer, allocatable :: narray(:) 
-      integer :: i, num_values, ios
+      integer :: num_values, ios
       character(len=1000) :: line
       character(len=100) :: param_name
       logical :: ndim_found, material_found, xatu_found, bandlist_found
