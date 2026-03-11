@@ -35,21 +35,23 @@ contains
       do i = 1, len(str)
          if (out(i:i) >= 'A' .and. out(i:i) <= 'Z') &
             out(i:i) = char(iachar(out(i:i)) + 32)
-      end do
-   end function to_lower
-!--------------------------------------------------------------------
-   subroutine wannier90_get(material_name_in)
-      implicit none
-      ! -----------------------------------------------------------------
-      character(len=*), intent(in) :: material_name_in    ! full path read from input.txt
-      ! -----------------------------------------------------------------
-      integer          :: fp, iR, i, ialpha, ialphap
-      integer          :: nkk1, nkk2, nRzero
-      real(8)          :: a1,a2,a3,a4,a5,a6
-      character(len=:), allocatable :: file2open, basename
-      integer          :: p, ext_pos
-      ! -----------------------------------------------------------------
-      write(*,*) '2. Entering parser_wannier90_tb'
+         end do
+      end function to_lower
+      !--------------------------------------------------------------------
+      subroutine wannier90_get(material_name_in)
+         implicit none
+         ! -----------------------------------------------------------------
+         character(len=*), intent(in) :: material_name_in    ! full path read from input.txt
+         ! -----------------------------------------------------------------
+         integer          :: fp, iR, i, ialpha, ialphap
+         integer          :: nkk1, nkk2, nRzero
+         real(8)          :: a1,a2,a3,a4,a5,a6
+         character(len=:), allocatable :: file2open, basename
+         integer          :: p, ext_pos
+         integer :: num_chunks
+         integer :: rem
+         ! -----------------------------------------------------------------
+         write(*,*) '2. Entering parser_wannier90_tb'
 
       ! === 1.  Use the path exactly as supplied ========================
       !write(*,*) "MATERIAL NAME PARSED:", material_name_in
@@ -86,13 +88,14 @@ contains
       allocate (rhop_c(3,nR,norb,norb))
       allocate (Degen(nR))
 
-      ! Read degeneracies
-      if ((nR / 15) > 1) then
-         do i = 1, (nR / 15)
-            read(fp, *) Degen((i - 1) * 15 + 1:(i - 1) * 15 + 15)
-         end do
+      num_chunks = nR / 15
+      rem = MOD(nR, 15)
+      do i = 1, num_chunks
+         read(fp, *) Degen((i - 1) * 15 + 1:(i - 1) * 15 + 15)
+      end do
+      if (rem > 0) then
+         read(fp, *) Degen(num_chunks * 15 + 1:num_chunks * 15 + rem)
       end if
-      read(fp, *) Degen((i - 1) * 15 + 1:(i - 1) * 15 + MOD(nR, 15))
 
       !get the hopping matrices
       do iR=1,nR
