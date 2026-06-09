@@ -512,7 +512,7 @@ subroutine get_grid()
         end do
       end do
       
-    elseif ( active_y .and. active_y ) then
+    elseif ( active_x .and. active_z ) then
       ! active axes: rk1 (fast) and rk3 (slow)
       k=1
       do i2=1,npointstotal_sq        ! rk3 slow
