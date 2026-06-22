@@ -310,98 +310,99 @@ end subroutine get_shift_intens_sp
 
 
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
-  subroutine initialize_sigma_second_arrays(nw,wp,eta2,sigma_w)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  subroutine initialize_sigma_second_arrays(nw, wp, eta2, sigma_w)
+    use omp_lib
     implicit none
-  
-    integer :: nw
+
+    integer,    intent(in)  :: nw
+    real(8),    intent(out) :: wp(nw)
+    real(8),    intent(out)  :: eta2          ! written back as out below
+    complex(8), intent(out) :: sigma_w(3,3,3,nw)
+
+    real(8) :: wrange
     integer :: i
 
-    dimension :: wp(nw)
-    dimension :: sigma_w(3,3,3,nw)
+    ! scalar outputs that were previously implicit via host association
+    real(8) :: eta2_local
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-    real(8) :: wrange,wp,eta2
-    complex(8) :: sigma_w
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    ! Zero arrays in parallel
+    !$omp parallel do schedule(static)
+    do i = 1, nw
+      wp(i)      = 0.0d0
+      sigma_w(:,:,:,i) = (0.0d0, 0.0d0)
+    end do
+    !$omp end parallel do
 
-    wp=0.0d0
-    sigma_w=0.0d0
-    wrange=e2-e1
-    do i=1,nw
-      wp(i)=(e1+wrange/dble(nw)*dble(i-1))/27.211385d0
-    end do  
-    eta2=eta/27.211385d0 !change units to hartree units
+    wrange = e2 - e1
 
-  
+    ! Fill frequency grid in parallel
+    !$omp parallel do schedule(static)
+    do i = 1, nw
+      wp(i) = (e1 + wrange / dble(nw) * dble(i-1)) / 27.211385d0
+    end do
+    !$omp end parallel do
+
+    eta2 = eta / 27.211385d0   ! scalar — no parallelism needed
+
   end subroutine initialize_sigma_second_arrays
 
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  subroutine print_sigma_second_sp(nw,wp,sigma_w_sp,shift_vector_w)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  subroutine print_sigma_second_sp(nw, wp, sigma_w_sp, shift_vector_w)
+    use omp_lib
     implicit none
- 
-    !in/out
+
+    integer,     intent(in) :: nw
+    real(8),     intent(in) :: wp(nw)
+    complex(8),  intent(in) :: sigma_w_sp(3,3,3,nw)
+    real(8),     intent(in) :: shift_vector_w(3,3,nw)
+
     integer :: iw
-    integer :: nw
-    dimension :: wp(nw)
-    dimension :: sigma_w_sp(3,3,3,nw)
-    dimension :: shift_vector_w(3,3,nw)
-    
-    real*8 :: wp
-    complex*16 :: sigma_w_sp
-    real*8 :: shift_vector_w
-    
-    !here
-    real*8 :: feps
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
-    !write frequency dependent conductivity	  
-    open(90,file='shift_sp_lengthgauge_'//trim(material_name)//'.dat')
-    open(100,file='shift_vector.dat')
-    do iw=1,nw
-      !feps=-6.623618d-03/(27.21138**2)*1.0d06 !%go from au to (\mu A /V^2)*Angstrongs
-      !d=2.6d0 !thickness in angstrongs for MoS2
-      !d=3.28d0 !thickness in angstrongs for h-BN
-      !feps=feps/(d/0.52917721067121d0) 
-      feps=(6.623618d-03)*(1.0d+06)*(27.211386**(-2))*(5.291772d-11)*(1.0d+09) !%go from au to (\mu A /V^2)*nm	
-      write(90,*) wp(iw)*27.211385d0,&
-                realpart(feps*sigma_w_sp(1,1,1,iw)), &
-		        realpart(feps*sigma_w_sp(1,1,2,iw)), &
-		        realpart(feps*sigma_w_sp(1,1,3,iw)), &
-		        realpart(feps*sigma_w_sp(1,2,1,iw)), &
-		  	    realpart(feps*sigma_w_sp(1,2,2,iw)), & 
-		  	    realpart(feps*sigma_w_sp(1,2,3,iw)), &
-		        realpart(feps*sigma_w_sp(1,3,1,iw)), &
-		        realpart(feps*sigma_w_sp(1,3,2,iw)), &
-		        realpart(feps*sigma_w_sp(1,3,3,iw)), &
-                realpart(feps*sigma_w_sp(2,1,1,iw)), &
-		        realpart(feps*sigma_w_sp(2,1,2,iw)), &
-		        realpart(feps*sigma_w_sp(2,1,3,iw)), &
-		        realpart(feps*sigma_w_sp(2,2,1,iw)), &
-		  	    realpart(feps*sigma_w_sp(2,2,2,iw)), & 
-		  	    realpart(feps*sigma_w_sp(2,2,3,iw)), &
-		        realpart(feps*sigma_w_sp(2,3,1,iw)), &
-		        realpart(feps*sigma_w_sp(2,3,2,iw)), &
-		        realpart(feps*sigma_w_sp(2,3,3,iw)), &
-                realpart(feps*sigma_w_sp(3,1,1,iw)), &
-		        realpart(feps*sigma_w_sp(3,1,2,iw)), &
-		        realpart(feps*sigma_w_sp(3,1,3,iw)), &
-		        realpart(feps*sigma_w_sp(3,2,1,iw)), &
-		  	    realpart(feps*sigma_w_sp(3,2,2,iw)), & 
-		  	    realpart(feps*sigma_w_sp(3,2,3,iw)), &
-		        realpart(feps*sigma_w_sp(3,3,1,iw)), &
-		        realpart(feps*sigma_w_sp(3,3,2,iw)), &
-		        realpart(feps*sigma_w_sp(3,3,3,iw))
-      write(100,*) wp(iw)*27.211385d0,&
-            shift_vector_w(1,1,iw), &
-            shift_vector_w(1,2,iw), &
-            shift_vector_w(1,3,iw), &
-            shift_vector_w(2,1,iw), &
-            shift_vector_w(2,2,iw), &
-            shift_vector_w(2,3,iw), &
-            shift_vector_w(3,1,iw), &
-            shift_vector_w(3,2,iw), &
-            shift_vector_w(3,3,iw)
+    real(8) :: feps
+
+    ! Unit-conversion factor is loop-invariant — compute once
+    feps = 6.623618d-03 * 1.0d+06 * (27.211386d0**(-2)) &
+         * 5.291772d-11 * 1.0d+09
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    open(90,  file='shift_sp_lengthgauge_'//trim(material_name)//'.dat')
+    open(100, file='shift_vector.dat')
+
+    ! --- OPTION A: simple parallel loop with ordered I/O ---
+    ! Ordered writes preserve frequency ordering in the output files.
+    !$omp parallel do schedule(static) ordered private(iw)
+    do iw = 1, nw
+
+      !$omp ordered
+      write(90,*) wp(iw)*27.211385d0, &
+        realpart(feps*sigma_w_sp(1,1,1,iw)), realpart(feps*sigma_w_sp(1,1,2,iw)), &
+        realpart(feps*sigma_w_sp(1,1,3,iw)), realpart(feps*sigma_w_sp(1,2,1,iw)), &
+        realpart(feps*sigma_w_sp(1,2,2,iw)), realpart(feps*sigma_w_sp(1,2,3,iw)), &
+        realpart(feps*sigma_w_sp(1,3,1,iw)), realpart(feps*sigma_w_sp(1,3,2,iw)), &
+        realpart(feps*sigma_w_sp(1,3,3,iw)), realpart(feps*sigma_w_sp(2,1,1,iw)), &
+        realpart(feps*sigma_w_sp(2,1,2,iw)), realpart(feps*sigma_w_sp(2,1,3,iw)), &
+        realpart(feps*sigma_w_sp(2,2,1,iw)), realpart(feps*sigma_w_sp(2,2,2,iw)), &
+        realpart(feps*sigma_w_sp(2,2,3,iw)), realpart(feps*sigma_w_sp(2,3,1,iw)), &
+        realpart(feps*sigma_w_sp(2,3,2,iw)), realpart(feps*sigma_w_sp(2,3,3,iw)), &
+        realpart(feps*sigma_w_sp(3,1,1,iw)), realpart(feps*sigma_w_sp(3,1,2,iw)), &
+        realpart(feps*sigma_w_sp(3,1,3,iw)), realpart(feps*sigma_w_sp(3,2,1,iw)), &
+        realpart(feps*sigma_w_sp(3,2,2,iw)), realpart(feps*sigma_w_sp(3,2,3,iw)), &
+        realpart(feps*sigma_w_sp(3,3,1,iw)), realpart(feps*sigma_w_sp(3,3,2,iw)), &
+        realpart(feps*sigma_w_sp(3,3,3,iw))
+
+      write(100,*) wp(iw)*27.211385d0, &
+        shift_vector_w(1,1,iw), shift_vector_w(1,2,iw), shift_vector_w(1,3,iw), &
+        shift_vector_w(2,1,iw), shift_vector_w(2,2,iw), shift_vector_w(2,3,iw), &
+        shift_vector_w(3,1,iw), shift_vector_w(3,2,iw), shift_vector_w(3,3,iw)
+      !$omp end ordered
+
     end do
+    !$omp end parallel do
+
     close(90)
     close(100)
+
   end subroutine print_sigma_second_sp
 end module sigma_second_sp
 
