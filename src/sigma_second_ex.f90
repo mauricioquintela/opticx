@@ -150,19 +150,22 @@ subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
       ihuang = 0
 
       if (imine .eq. 1) then
-        d1 = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(omegaq-e_ex(nnp))**2)
-        d2 = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(omegaq+e_ex(nnp))**2)
-        d3 = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(omegaq+e_ex(nn))**2)
-        d4 = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(omegap-e_ex(nnp))**2)
 
-        s1 = -vme_ex(nj1,nn)/e_ex(nn) * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
-        s2 =  conjg(vme_ex(nj1,nn))/e_ex(nn) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)
-        s3 = -xme_ex(nj1,nn) * vme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
-
-        aux1 = s1 * (-cmplx(0.0d0, 1.0d0, 8) * pi * d1)
-        aux2 = s2 * (-cmplx(0.0d0, 1.0d0, 8) * pi * d2)
-        aux3 = s3 * (-pi**2 * d3 * d4)
-        shift_kernel_ex = -(aux1 + aux2 + aux3)
+        d1=1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(omegaq-e_ex(nnp))**2)
+	    d2=1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(omegaq+e_ex(nnp))**2)
+	    d3=1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(omegaq+e_ex(nn))**2)
+	    d4=1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(omegap-e_ex(nnp))**2)		 	    
+		  	  
+		!First version: 2023. WORKING
+		s1=-vme_ex(nj1,nn)/e_ex(nn)*xme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp))   
+		s2=conjg(vme_ex(nj1,nn))/e_ex(nn)*conjg(xme_ex_inter(nj2,nn,nnp))*xme_ex(nj3,nnp) 	  	 		  
+		s3=-xme_ex(nj1,nn)*vme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp)) 
+		
+		aux1=s1*(-complex(0.0d0,1.0d0)*pi*d1)		  
+	    aux2=s2*(-complex(0.0d0,1.0d0)*pi*d2)
+	    aux3=s3*(-pi**2*d3*d4)		 
+	    
+        shift_kernel_ex=-(aux1+aux2+aux3)
       end if
 
       if (ilorentzian .eq. 1) then
@@ -174,9 +177,9 @@ subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
         s2 = conjg(vme_ex(nj1,nn)) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)
         s3 = -xme_ex(nj1,nn)       * vme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
 
-        s1 = cmplx(0.0d0, aimag(s1), 8)
-        s2 = cmplx(0.0d0, aimag(s2), 8)
-        s3 = cmplx(0.0d0, aimag(s3), 8)
+        s1 = cmplx(aimag(s1), 0.0d0, 8)
+        s2 = cmplx(aimag(s2), 0.0d0, 8)
+        s3 = cmplx(aimag(s3), 0.0d0, 8)
 
         aux1 = s1 * d1
         aux2 = s2 * d2
