@@ -197,17 +197,17 @@ contains
     deallocate(ek, vme_ex_band)
     if (iflag_norder == 2) &
       deallocate(berry_eigen_ex_band, gen_der_ex_band, shift_vector_ex_band, xme_ex_band)
-    if (iflag_norder == 2) then
-      open(99, file='debug_inter_nj2.dat')
-      do nn = 1, norb_ex_cut
-        do nnp = 1, norb_ex_cut
-          write(99,'(2I8,8E20.10)') nn, nnp, &
-            vme_ex_inter1(2,nn,nnp), vme_ex_inter2(2,nn,nnp), &
-            yme_ex_inter1(2,nn,nnp), yme_ex_inter2(2,nn,nnp)
-        end do
-      end do
-      close(99)
-    end if
+!     if (iflag_norder == 2) then
+!       open(99, file='debug_inter_nj2.dat')
+!       do nn = 1, norb_ex_cut
+!         do nnp = 1, norb_ex_cut
+!           write(99,'(2I8,8E20.10)') nn, nnp, &
+!             vme_ex_inter1(2,nn,nnp), vme_ex_inter2(2,nn,nnp), &
+!             yme_ex_inter1(2,nn,nnp), yme_ex_inter2(2,nn,nnp)
+!         end do
+!       end do
+!       close(99)
+!     end if
   end subroutine get_ome_ex
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
