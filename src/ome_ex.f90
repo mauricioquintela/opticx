@@ -1,432 +1,539 @@
 module ome_ex
   use constants_math
   use parser_input_file, &
-  only:nf,e1,e2,eta,nw
+    only: nf, e1, e2, eta, nw
   use parser_wannier90_tb, &
-  only:material_name,norb
+    only: material_name, norb
   use parser_optics_xatu_dim, &
-  only:npointstotal,vcell, &
-  norb_ex,norb_ex_cut,nv_ex,nc_ex,nband_ex,e_ex,fk_ex, &
-  get_ex_index_first,print_exciton_wf, & !routines
-  rkxvector,rkyvector,rkzvector !k-vectors only used for testing
+    only: npointstotal, vcell, &
+          norb_ex, norb_ex_cut, nv_ex, nc_ex, nband_ex, e_ex, fk_ex, &
+          get_ex_index_first, print_exciton_wf, &
+          rkxvector, rkyvector, rkzvector
   use exciton_envelopes, &
-  only:fk_ex_der,get_fk_ex_der_k !routines
+    only: fk_ex_der, get_fk_ex_der_k
   implicit none
 
-  !ex-vme
-  allocatable :: xme_ex(:,:) !R_{0N}  
-  allocatable :: vme_ex(:,:) !V_{0N} 
+  complex(8), allocatable :: xme_ex(:,:)
+  complex(8), allocatable :: vme_ex(:,:)
+  complex(8), allocatable :: qme_ex_inter1(:,:,:)
+  complex(8), allocatable :: qme_ex_inter2(:,:,:)
+  complex(8), allocatable :: qme_ex_inter(:,:,:)
+  complex(8), allocatable :: yme_ex_inter1(:,:,:)
+  complex(8), allocatable :: yme_ex_inter2(:,:,:)
+  complex(8), allocatable :: yme_ex_inter(:,:,:)
+  complex(8), allocatable :: xme_ex_inter(:,:,:)
+  complex(8), allocatable :: vme_ex_inter1(:,:,:)
+  complex(8), allocatable :: vme_ex_inter2(:,:,:)
+  complex(8), allocatable :: vme_ex_inter(:,:,:)
 
-  !ex-rme
-  allocatable :: qme_ex_inter1(:,:,:) !Q_{NN'} (1)
-  allocatable :: qme_ex_inter2(:,:,:) !Q_{NN'} (2)
-  allocatable :: qme_ex_inter(:,:,:)  !Q_{NN'} 
-  allocatable :: yme_ex_inter1(:,:,:) !Y_{NN'} (1)
-  allocatable :: yme_ex_inter2(:,:,:) !Y_{NN'} (2)
-  allocatable :: yme_ex_inter(:,:,:)  !Y_{NN'} 
-  allocatable :: xme_ex_inter(:,:,:)  !R_{NN'}
-  allocatable :: vme_ex_inter1(:,:,:) !V_{NN'} (1)
-  allocatable :: vme_ex_inter2(:,:,:) !V_{NN'} (2)  
-  allocatable :: vme_ex_inter(:,:,:)  !V_{NN'}
-  
-  complex*16 :: xme_ex,vme_ex
-  complex*16 :: qme_ex_inter1,qme_ex_inter2,qme_ex_inter
-  complex*16 :: yme_ex_inter1,yme_ex_inter2,yme_ex_inter
-  complex*16 :: xme_ex_inter
-  complex*16 :: vme_ex_inter1,vme_ex_inter2,vme_ex_inter
+contains
 
-  contains
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-subroutine get_ome_ex(iflag_norder)
-  implicit none
+  subroutine get_ome_ex(iflag_norder)
+    implicit none
+    integer, intent(in) :: iflag_norder
 
-  integer, intent(in) :: iflag_norder
-  integer :: ibz
-  integer :: nn, nnp
-  integer :: nj
+    integer :: ibz, nn, nnp, nj, nbasis
+    integer :: u_exk
+    logical :: do_write_exk
 
-  ! For k-resolved excitonic linear output
-  integer :: u_exk
-  logical :: do_write_exk
-  complex*16, allocatable :: vme_ex_k(:,:)   ! (3, norb_ex_cut)
+    complex(8), allocatable :: vme_ex_k(:,:)
+    real(8),    allocatable :: ek(:,:)
+    complex(8), allocatable :: xme_ex_band(:,:,:,:)
+    complex(8), allocatable :: vme_ex_band(:,:,:,:)
+    complex(8), allocatable :: berry_eigen_ex_band(:,:,:,:)
+    complex(8), allocatable :: gen_der_ex_band(:,:,:,:,:)
+    real(8),    allocatable :: shift_vector_ex_band(:,:,:,:,:)
 
-  ! auxiliary arrays used to evaluate ex-ome
-  dimension ek(npointstotal,nband_ex)
-  dimension xme_ex_band(npointstotal,3,nband_ex,nband_ex)
-  dimension vme_ex_band(npointstotal,3,nband_ex,nband_ex)
-  dimension berry_eigen_ex_band(npointstotal,3,nband_ex,nband_ex)
-  dimension gen_der_ex_band(npointstotal,3,3,nband_ex,nband_ex)
-  dimension shift_vector_ex_band(npointstotal,3,3,nband_ex,nband_ex)
+    ! Working arrays for get_ome_inter_ex_sum_k — allocated once outside k-loop
+    integer,    allocatable :: i_ex_table(:,:)
+    complex(8), allocatable :: F_cv(:,:)
+    complex(8), allocatable :: FcvH(:,:)
+    complex(8), allocatable :: D_c(:,:)
+    complex(8), allocatable :: A_c(:,:)
+    complex(8), allocatable :: B_cc(:,:)
+    complex(8), allocatable :: Y_cc(:,:)
+    complex(8), allocatable :: B_vv(:,:)
+    complex(8), allocatable :: Y_vv(:,:)
+    complex(8), allocatable :: Uc(:,:)
+    complex(8), allocatable :: Wv(:,:)
+    complex(8), allocatable :: mid_cc(:,:)
+    complex(8), allocatable :: mid_vv(:,:)
+    complex(8), allocatable :: out_v(:,:)
+    complex(8), allocatable :: out_y(:,:)
+    complex(8), allocatable :: out_q(:,:)
 
-  real*8 :: ek
-  real*8 :: shift_vector_ex_band
-  complex*16 :: xme_ex_band
-  complex*16 :: vme_ex_band
-  complex*16 :: berry_eigen_ex_band
-  complex*16 :: gen_der_ex_band
+    write(*,*) '6. Entering ome_ex'
+    do_write_exk = (iflag_norder == 1)
 
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  write(*,*) '6. Entering ome_ex'
+    allocate(ek(npointstotal, nband_ex))
+    allocate(vme_ex_band(npointstotal, 3, nband_ex, nband_ex))
 
-  ! Decide whether to write the k-resolved file:
-  ! Only makes sense for linear (iflag_norder == 1)
-  do_write_exk = (iflag_norder .eq. 1)
+    if (iflag_norder == 1) then
+      ek = 0.0d0
+      vme_ex_band = (0.0d0, 0.0d0)
+      write(*,*) '   Reading optical matrix elements (sp)...'
+      call read_ome_sp_linear(iflag_norder, npointstotal, nband_ex, vme_ex_band, ek)
+    end if
 
-  ! read SP optical matrix elements from file
-  write(*,*) '   Reading optical matrix elements (sp)...'
-  if (iflag_norder .eq. 1) then
-    vme_ex_band = 0.0d0
-    ek = 0.0d0
-    call read_ome_sp_linear(iflag_norder, npointstotal, nband_ex, vme_ex_band, ek)
-  end if
+    if (iflag_norder == 2) then
+      allocate(berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex))
+      allocate(gen_der_ex_band(npointstotal, 3, 3, nband_ex, nband_ex))
+      allocate(shift_vector_ex_band(npointstotal, 3, 3, nband_ex, nband_ex))
+      allocate(xme_ex_band(npointstotal, 3, nband_ex, nband_ex))
+      ek = 0.0d0
+      vme_ex_band          = (0.0d0, 0.0d0)
+      berry_eigen_ex_band  = (0.0d0, 0.0d0)
+      gen_der_ex_band      = (0.0d0, 0.0d0)
+      shift_vector_ex_band = 0.0d0
+      write(*,*) '   Reading optical matrix elements (sp)...'
+      call read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, &
+                                  berry_eigen_ex_band, gen_der_ex_band, &
+                                  shift_vector_ex_band, vme_ex_band, ek)
+      xme_ex_band = (0.0d0, 0.0d0)
+      call get_ome_sp_xme_ex_band(ek, vme_ex_band, xme_ex_band)
+    end if
 
-  if (iflag_norder .eq. 2) then
-    ek = 0.0d0
-    vme_ex_band = 0.0d0
-    berry_eigen_ex_band = 0.0d0
-    gen_der_ex_band = 0.0d0
-    shift_vector_ex_band = 0.0d0
-    call read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, berry_eigen_ex_band, &
-                               gen_der_ex_band, shift_vector_ex_band, vme_ex_band, ek)
-
-    xme_ex_band = 0.0d0
-    call get_ome_sp_xme_ex_band(ek, vme_ex_band, xme_ex_band)
-  end if
-
-  ! allocate arrays for ex-ome
-  ! linear conductivity
-  if (iflag_norder .eq. 1 .or. iflag_norder .eq. 2) then
     allocate(vme_ex(3, norb_ex_cut))
     allocate(xme_ex(3, norb_ex_cut))
-    vme_ex = 0.0d0
-    xme_ex = 0.0d0
-  end if
+    vme_ex = (0.0d0, 0.0d0)
+    xme_ex = (0.0d0, 0.0d0)
 
-  ! allocate k-resolved buffer + open file (linear only)
-  if (do_write_exk) then
-    allocate(vme_ex_k(3, norb_ex_cut))
-    vme_ex_k = 0.0d0
-    u_exk = 77
-    call write_ome_ex_linear_kresolved_init(u_exk, material_name, norb_ex_cut)
-  end if
-
-  ! second order ones
-  if (iflag_norder .eq. 2) then
-    allocate(qme_ex_inter1(3, norb_ex_cut, norb_ex_cut))
-    allocate(qme_ex_inter2(3, norb_ex_cut, norb_ex_cut))
-    allocate(qme_ex_inter(3, norb_ex_cut, norb_ex_cut))
-    allocate(yme_ex_inter1(3, norb_ex_cut, norb_ex_cut))
-    allocate(yme_ex_inter2(3, norb_ex_cut, norb_ex_cut))
-    allocate(yme_ex_inter(3, norb_ex_cut, norb_ex_cut))
-    
-    ! Allocation is deferred to after the k-loop so we dont waste memory initialising an array that is only ever
-    ! written once at the end.
-    allocate(vme_ex_inter1(3, norb_ex_cut, norb_ex_cut))
-    allocate(vme_ex_inter2(3, norb_ex_cut, norb_ex_cut))
-    allocate(vme_ex_inter(3, norb_ex_cut, norb_ex_cut))
-
-    qme_ex_inter1 = 0.0d0
-    qme_ex_inter2 = 0.0d0
-    qme_ex_inter  = 0.0d0
-    yme_ex_inter1 = 0.0d0
-    yme_ex_inter2 = 0.0d0
-    yme_ex_inter  = 0.0d0
-    vme_ex_inter1 = 0.0d0
-    vme_ex_inter2 = 0.0d0
-    vme_ex_inter  = 0.0d0
-
-    ! allocate and get derivative of exciton envelope function with respect to k
-    allocate(fk_ex_der(3, norb_ex, norb_ex_cut))
-    call get_fk_ex_der_k()
-  end if
-
-  if (iflag_norder .eq. 1) then
-    write(*,*) '   Evaluating excitonic optical matrix elements for linear conductivity...'
-  end if
-  if (iflag_norder .eq. 2) then
-    write(*,*) '   Evaluating excitonic optical matrix elements for nonlinear conductivity...'
-  end if
-
-  ! k-space integration of excitonic optical matrix elements
-  do ibz = 1, npointstotal
-    write(*,*) '   Optical matrix elements (ex): k-point', ibz, '/', npointstotal
-
-    ! Fill V_{0N} and X_{0N} (summed over k) for linear conductivity
-    ! get_ome_gs_ex_sum_k needs internal parallelization
-    if (iflag_norder .eq. 1 .or. iflag_norder .eq. 2) then
-      call get_ome_gs_ex_sum_k(ibz, ek, xme_ex_band, vme_ex_band)
-    end if
-
-    ! Also write k-resolved contribution for linear case:
-    ! get_ome_gs_ex_kresolved needs internal parallelization
     if (do_write_exk) then
-      call get_ome_gs_ex_kresolved(ibz, ek, vme_ex_band, vme_ex_k)
-      call write_ome_ex_linear_kresolved_point(u_exk, rkxvector(ibz), rkyvector(ibz), rkzvector(ibz), &
-                                               norb_ex_cut, vme_ex_k)
+      allocate(vme_ex_k(3, norb_ex_cut))
+      vme_ex_k = (0.0d0, 0.0d0)
+      u_exk = 77
+      call write_ome_ex_linear_kresolved_init(u_exk, material_name, norb_ex_cut)
     end if
 
-    ! get_ome_inter_ex_sum_k is parallelized internally
-    if (iflag_norder .eq. 2) then
-      call get_ome_inter_ex_sum_k(ibz, ek, xme_ex_band, vme_ex_band, berry_eigen_ex_band)
+    if (iflag_norder == 2) then
+      allocate(qme_ex_inter1(3, norb_ex_cut, norb_ex_cut))
+      allocate(qme_ex_inter2(3, norb_ex_cut, norb_ex_cut))
+      allocate(qme_ex_inter (3, norb_ex_cut, norb_ex_cut))
+      allocate(yme_ex_inter1(3, norb_ex_cut, norb_ex_cut))
+      allocate(yme_ex_inter2(3, norb_ex_cut, norb_ex_cut))
+      allocate(yme_ex_inter (3, norb_ex_cut, norb_ex_cut))
+      allocate(vme_ex_inter1(3, norb_ex_cut, norb_ex_cut))
+      allocate(vme_ex_inter2(3, norb_ex_cut, norb_ex_cut))
+      allocate(vme_ex_inter (3, norb_ex_cut, norb_ex_cut))
+      qme_ex_inter1 = (0.0d0, 0.0d0)
+      qme_ex_inter2 = (0.0d0, 0.0d0)
+      qme_ex_inter  = (0.0d0, 0.0d0)
+      yme_ex_inter1 = (0.0d0, 0.0d0)
+      yme_ex_inter2 = (0.0d0, 0.0d0)
+      yme_ex_inter  = (0.0d0, 0.0d0)
+      vme_ex_inter1 = (0.0d0, 0.0d0)
+      vme_ex_inter2 = (0.0d0, 0.0d0)
+      vme_ex_inter  = (0.0d0, 0.0d0)
+
+      allocate(fk_ex_der(3, norb_ex, norb_ex_cut))
+      call get_fk_ex_der_k()
+
+      nbasis = nc_ex * nv_ex
+      allocate(i_ex_table(nc_ex,  nv_ex))
+      allocate(F_cv (norb_ex_cut, nbasis))
+      allocate(FcvH (nbasis,      norb_ex_cut))
+      allocate(D_c  (nbasis,      norb_ex_cut))
+      allocate(A_c  (nbasis,      norb_ex_cut))
+      allocate(B_cc (nc_ex,       nc_ex))
+      allocate(Y_cc (nc_ex,       nc_ex))
+      allocate(B_vv (nv_ex,       nv_ex))
+      allocate(Y_vv (nv_ex,       nv_ex))
+      allocate(Uc   (nc_ex,       norb_ex_cut))
+      allocate(Wv   (nv_ex,       norb_ex_cut))
+      allocate(mid_cc(nc_ex,      norb_ex_cut))
+      allocate(mid_vv(nv_ex,      norb_ex_cut))
+      allocate(out_v(norb_ex_cut, norb_ex_cut))
+      allocate(out_y(norb_ex_cut, norb_ex_cut))
+      allocate(out_q(norb_ex_cut, norb_ex_cut))
     end if
-  end do
 
-  if (do_write_exk) then
-    call write_ome_ex_linear_kresolved_close(u_exk)
-    deallocate(vme_ex_k)
-    write(*,*) '   k-resolved linear excitonic matrix elements written (omeexk)'
-  end if
+    if (iflag_norder == 1) write(*,*) '   Evaluating excitonic OMEs for linear conductivity...'
+    if (iflag_norder == 2) write(*,*) '   Evaluating excitonic OMEs for nonlinear conductivity...'
 
-  if (iflag_norder .eq. 2) then
-    allocate(xme_ex_inter(3, norb_ex_cut, norb_ex_cut))
+    do ibz = 1, npointstotal
+      write(*,*) '   OME (ex): k-point', ibz, '/', npointstotal
 
-    ! Sum all terms together for matrix elements (N,N')
-    do nn = 1, norb_ex_cut
-      do nnp = 1, norb_ex_cut
-        do nj = 1, 3
-          qme_ex_inter(nj, nn, nnp) = qme_ex_inter1(nj, nn, nnp) + qme_ex_inter2(nj, nn, nnp)
-          yme_ex_inter(nj, nn, nnp) = yme_ex_inter1(nj, nn, nnp) + yme_ex_inter2(nj, nn, nnp)
-          xme_ex_inter(nj, nn, nnp) = yme_ex_inter(nj, nn, nnp)  + qme_ex_inter(nj, nn, nnp)
-          vme_ex_inter(nj, nn, nnp) = vme_ex_inter1(nj, nn, nnp) + vme_ex_inter2(nj, nn, nnp)
+      if (iflag_norder == 1 .or. iflag_norder == 2) &
+        call get_ome_gs_ex_sum_k(ibz, ek, vme_ex_band, xme_ex_band)
+
+      if (do_write_exk) then
+        call get_ome_gs_ex_kresolved(ibz, ek, vme_ex_band, vme_ex_k)
+        call write_ome_ex_linear_kresolved_point(u_exk, rkxvector(ibz), rkyvector(ibz), &
+                                                  rkzvector(ibz), norb_ex_cut, vme_ex_k)
+      end if
+
+      if (iflag_norder == 2) &
+        call get_ome_inter_ex_sum_k(                                        &
+               ibz, ek, xme_ex_band, vme_ex_band, berry_eigen_ex_band,     &
+               nbasis, i_ex_table, F_cv, FcvH, D_c, A_c,                   &
+               B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv,             &
+               out_v, out_y, out_q)
+    end do
+
+    if (do_write_exk) then
+      call write_ome_ex_linear_kresolved_close(u_exk)
+      deallocate(vme_ex_k)
+      write(*,*) '   k-resolved linear excitonic OMEs written (omeexk)'
+    end if
+
+    if (iflag_norder == 2) then
+      allocate(xme_ex_inter(3, norb_ex_cut, norb_ex_cut))
+      qme_ex_inter = qme_ex_inter1 + qme_ex_inter2
+      yme_ex_inter = yme_ex_inter1 + yme_ex_inter2
+      xme_ex_inter = yme_ex_inter  + qme_ex_inter
+      vme_ex_inter = vme_ex_inter1 + vme_ex_inter2
+      deallocate(i_ex_table, F_cv, FcvH, D_c, A_c)
+      deallocate(B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv)
+      deallocate(out_v, out_y, out_q)
+      deallocate(fk_ex_der)
+    end if
+
+    write(*,*) '   Optical matrix elements (ex) have been evaluated'
+    if (iflag_norder == 1) call write_ome_ex_linear(vme_ex)
+    write(*,*) '   Optical matrix elements (ex, N->GS) written'
+    write(*,*) '   Optical matrix elements (ex, N->N'') not printed in this version'
+
+    deallocate(ek, vme_ex_band)
+    if (iflag_norder == 2) &
+      deallocate(berry_eigen_ex_band, gen_der_ex_band, shift_vector_ex_band, xme_ex_band)
+    if (iflag_norder == 2) then
+      open(99, file='debug_inter_nj2.dat')
+      do nn = 1, norb_ex_cut
+        do nnp = 1, norb_ex_cut
+          write(99,'(2I8,8E20.10)') nn, nnp, &
+            vme_ex_inter1(2,nn,nnp), vme_ex_inter2(2,nn,nnp), &
+            yme_ex_inter1(2,nn,nnp), yme_ex_inter2(2,nn,nnp)
+        end do
+      end do
+      close(99)
+    end if
+  end subroutine get_ome_ex
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  subroutine get_ome_sp_xme_ex_band(ek, vme_ex_band, xme_ex_band)
+    implicit none
+    real(8),    intent(in)  :: ek(npointstotal, nband_ex)
+    complex(8), intent(in)  :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(out) :: xme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    integer    :: ibz, i, j, nj
+    real(8)    :: de
+    complex(8), parameter :: ci = (0.0d0, 1.0d0)
+
+    xme_ex_band = (0.0d0, 0.0d0)
+    !$omp parallel do collapse(2) schedule(static) private(ibz, nj, i, j, de)
+    do ibz = 1, npointstotal
+      do nj = 1, 3
+        do i = 1, nband_ex
+          do j = 1, nband_ex
+            de = ek(ibz,i) - ek(ibz,j)
+            if (abs(de) > 1.0d-6) then
+              xme_ex_band(ibz,nj,i,j) = -ci / de * vme_ex_band(ibz,nj,i,j)
+              if (abs(xme_ex_band(ibz,nj,i,j)) > 20.0d0) &
+                xme_ex_band(ibz,nj,i,j) = (0.0d0, 0.0d0)
+            end if
+          end do
         end do
       end do
     end do
-  end if
-
-  write(*,*) '   Optical matrix elements (ex) have been evaluated'
-
-  ! writing excitonic optical matrix elements (summed over k)
-  if (iflag_norder .eq. 1) then
-    call write_ome_ex_linear(vme_ex)
-  end if
-  write(*,*) '   Optical matrix elements (ex, N -> GS) have been written in file'
-  write(*,*) '   Optical matrix elements (ex, N -> N^prime) will not be printed in this version'
-
-end subroutine get_ome_ex
-  
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  subroutine get_ome_sp_xme_ex_band(ek,vme_ex_band,xme_ex_band)
-    implicit none
-    
-    !in/out
-    dimension ek(npointstotal,nband_ex)
-    dimension vme_ex_band(npointstotal,3,nband_ex,nband_ex)
-    dimension xme_ex_band(npointstotal,3,nband_ex,nband_ex)
-    
-    real*8 :: ek
-    complex*16 :: vme_ex_band,xme_ex_band
-
-    !here
-    integer :: ibz,i,j,nj
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    xme_ex_band=0.0d0
-    do ibz=1,npointstotal
-      do nj=1,3
-        do i=1,nband_ex
-          do j=1,nband_ex
-            if (abs(ek(ibz,i)-ek(ibz,j)).lt.1.0d-06) then
-              xme_ex_band(ibz,nj,i,j)=0.0d0
-            else		  
-              xme_ex_band(ibz,nj,i,j)=-complex(0.0d0,1.0d0)/(ek(ibz,i)-ek(ibz,j))* &
-                                     vme_ex_band(ibz,nj,i,j)
-            end if
-            if (abs(xme_ex_band(ibz,nj,i,j)).gt.20.0d0) then
-              xme_ex_band(ibz,nj,i,j)=0.0d0
-            end if
-          end do
-        end do		 	  
-      end do
-    end do
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    !$omp end parallel do
   end subroutine get_ome_sp_xme_ex_band
 
-
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  subroutine get_ome_gs_ex_sum_k(ibz, ek, xme_ex_band, vme_ex_band)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  subroutine get_ome_gs_ex_sum_k(ibz, ek, vme_ex_band, xme_ex_band)
     implicit none
-    integer, intent(in) :: ibz
+    integer,    intent(in) :: ibz
+    real(8),    intent(in) :: ek(npointstotal, nband_ex)
+    complex(8), intent(in) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(in) :: xme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    integer :: nn, ic, iv, i_ex_nn, nj
 
-    integer :: nn, ic, iv, iright, nj
-    integer :: i_ex_nn
-
-    dimension ek(npointstotal, nband_ex)
-    dimension vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
-    dimension xme_ex_band(npointstotal, 3, nband_ex, nband_ex)
-
-    real*8    :: ek
-    complex*16 :: vme_ex_band, xme_ex_band
-
-    ! Thread-private accumulators for vme/xme contributions from this k-point.
-    ! Each thread owns its own nn slice; no reduction on module-level arrays needed
-    ! because distinct nn values map to distinct memory locations.
-    !$OMP PARALLEL DO PRIVATE(nn, ic, iv, iright, i_ex_nn, nj)
-    do nn = 1, norb_ex_cut
-      do ic = 1, nc_ex
-        do iv = 1, nv_ex
-          iright = 0
-          call get_ex_index_first(nf, nv_ex, nc_ex, iright, ibz, i_ex_nn, ic, iv)
-          do nj = 1, 3
-            vme_ex(nj, nn) = vme_ex(nj, nn) + fk_ex(i_ex_nn, nn) * vme_ex_band(ibz, nj, iv, nv_ex+ic)
-            xme_ex(nj, nn) = xme_ex(nj, nn) + fk_ex(i_ex_nn, nn) * xme_ex_band(ibz, nj, iv, nv_ex+ic)
-          end do
-        end do
-      end do
-    end do
-    !$OMP END PARALLEL DO
-
-  end subroutine get_ome_gs_ex_sum_k
-
-
-  !-----------------------------------------------------------------
-  ! Compute k-resolved contribution to V_{0N} for a single k-point.
-  ! Uses the same convention as get_ome_gs_ex_sum_k (fk_ex unconjugated).
-  !-----------------------------------------------------------------
-  subroutine get_ome_gs_ex_kresolved(ibz, ek, vme_ex_band, vme_ex_k)
-    implicit none
-    integer, intent(in) :: ibz
-
-    integer :: nn, ic, iv, nj
-    integer :: i_ex_nn
-
-    dimension ek(npointstotal, nband_ex)
-    dimension vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
-    complex*16 :: vme_ex_band
-    complex*16 :: vme_ex_k(3, norb_ex_cut)
-    real*8     :: ek
-
-    vme_ex_k = 0.0d0
-
-    ! vme_ex_k(:, nn) is written only by the thread owning nn,
-    ! so no atomics or reductions are needed.
-    !$OMP PARALLEL DO PRIVATE(nn, ic, iv, i_ex_nn, nj)
+    !$omp parallel do schedule(static) private(nn, ic, iv, i_ex_nn, nj)
     do nn = 1, norb_ex_cut
       do ic = 1, nc_ex
         do iv = 1, nv_ex
           call get_ex_index_first(nf, nv_ex, nc_ex, 0, ibz, i_ex_nn, ic, iv)
           do nj = 1, 3
-            vme_ex_k(nj, nn) = vme_ex_k(nj, nn) + fk_ex(i_ex_nn, nn) * vme_ex_band(ibz, nj, iv, nv_ex+ic)
+            vme_ex(nj,nn) = vme_ex(nj,nn) + fk_ex(i_ex_nn,nn)*vme_ex_band(ibz,nj,iv,nv_ex+ic)
+            xme_ex(nj,nn) = xme_ex(nj,nn) + fk_ex(i_ex_nn,nn)*xme_ex_band(ibz,nj,iv,nv_ex+ic)
           end do
         end do
       end do
     end do
-    !$OMP END PARALLEL DO
+    !$omp end parallel do
+  end subroutine get_ome_gs_ex_sum_k
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  subroutine get_ome_gs_ex_kresolved(ibz, ek, vme_ex_band, vme_ex_k)
+    implicit none
+    integer,    intent(in)  :: ibz
+    real(8),    intent(in)  :: ek(npointstotal, nband_ex)
+    complex(8), intent(in)  :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(out) :: vme_ex_k(3, norb_ex_cut)
+    integer :: nn, ic, iv, i_ex_nn, nj
+
+    vme_ex_k = (0.0d0, 0.0d0)
+    !$omp parallel do schedule(static) private(nn, ic, iv, i_ex_nn, nj)
+    do nn = 1, norb_ex_cut
+      do ic = 1, nc_ex
+        do iv = 1, nv_ex
+          call get_ex_index_first(nf, nv_ex, nc_ex, 0, ibz, i_ex_nn, ic, iv)
+          do nj = 1, 3
+            vme_ex_k(nj,nn) = vme_ex_k(nj,nn) + fk_ex(i_ex_nn,nn)*vme_ex_band(ibz,nj,iv,nv_ex+ic)
+          end do
+        end do
+      end do
+    end do
+    !$omp end parallel do
   end subroutine get_ome_gs_ex_kresolved
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  subroutine get_ome_inter_ex_sum_k(ibz,ek,xme_ex_band,vme_ex_band,berry_eigen_ex_band)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! get_ome_inter_ex_sum_k
+!
+! IMPORTANT: the (ic,icp) contraction against B_cc/Y_cc must be carried out
+! separately for EACH value of iv, and the (iv,ivp) contraction against
+! B_vv/Y_vv must be carried out separately for EACH value of ic, and only
+! THEN summed. iv (resp. ic) is a shared "spectator" index tying together
+! both matrix-element factors in the original sum
+!
+!   V1_{nn,nn'} = sum_iv  sum_{ic,icp} conjg(f_{(ic,iv),nn}) B_cc(ic,icp) f_{(icp,iv),nn'}
+!   V2_{nn,nn'} = -sum_ic sum_{iv,ivp} conjg(f_{(ic,iv),nn}) B_vv(iv,ivp) f_{(ic,ivp),nn'}
+!
+! It is NOT valid to pre-sum fk_ex over iv (resp. ic) and then form a single
+! bilinear contraction from the pre-summed vectors: that silently introduces
+! spurious "cross" terms with iv /= iv' (resp. ic /= ic') that do not belong
+! in the physical sum. Each iv (resp. ic) therefore requires its own small
+! ZGEMM contraction, accumulated into the output with beta = 1.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  subroutine get_ome_inter_ex_sum_k(                                      &
+               ibz, ek, xme_ex_band, vme_ex_band, berry_eigen_ex_band,   &
+               nbasis, i_ex_table, F_cv, FcvH, D_c, A_c,                 &
+               B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv,           &
+               out_v, out_y, out_q)
     implicit none
 
-    !in/out
-    integer :: ibz
+    integer,    intent(in)    :: ibz
+    integer,    intent(in)    :: nbasis
+    real(8),    intent(in)    :: ek(npointstotal, nband_ex)
+    complex(8), intent(in)    :: xme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(in)    :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(in)    :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    integer,    intent(inout) :: i_ex_table(nc_ex, nv_ex)
+    complex(8), intent(inout) :: F_cv(norb_ex_cut, nbasis)
+    complex(8), intent(inout) :: FcvH(nbasis, norb_ex_cut)
+    complex(8), intent(inout) :: D_c(nbasis, norb_ex_cut)
+    complex(8), intent(inout) :: A_c(nbasis, norb_ex_cut)
+    complex(8), intent(inout) :: B_cc(nc_ex, nc_ex)
+    complex(8), intent(inout) :: Y_cc(nc_ex, nc_ex)
+    complex(8), intent(inout) :: B_vv(nv_ex, nv_ex)
+    complex(8), intent(inout) :: Y_vv(nv_ex, nv_ex)
+    complex(8), intent(inout) :: Uc(nc_ex, norb_ex_cut)
+    complex(8), intent(inout) :: Wv(nv_ex, norb_ex_cut)
+    complex(8), intent(inout) :: mid_cc(nc_ex, norb_ex_cut)
+    complex(8), intent(inout) :: mid_vv(nv_ex, norb_ex_cut)
+    complex(8), intent(inout) :: out_v(norb_ex_cut, norb_ex_cut)
+    complex(8), intent(inout) :: out_y(norb_ex_cut, norb_ex_cut)
+    complex(8), intent(inout) :: out_q(norb_ex_cut, norb_ex_cut)
 
-    dimension ek(npointstotal,nband_ex)
-    dimension vme_ex_band(npointstotal,3,nband_ex,nband_ex)
-    dimension berry_eigen_ex_band(npointstotal,3,nband_ex,nband_ex)
-    dimension xme_ex_band(npointstotal,3,nband_ex,nband_ex)
+    integer    :: ic, iv, icp, ivp, nj, i_ex, idx, nn
+    real(8)    :: berry_shift
+    complex(8), parameter :: ci    = (0.0d0, 1.0d0)
+    complex(8), parameter :: cone  = (1.0d0, 0.0d0)
+    complex(8), parameter :: czero = (0.0d0, 0.0d0)
 
-    real*8 :: ek
-    complex*16 :: vme_ex_band,berry_eigen_ex_band,xme_ex_band
-    complex*16 :: aux2
-
-    !here
-    integer :: nn,nnp
-    integer :: ic,iv,iright
-    integer :: icp,ivp
-    integer :: nj
-    integer :: i_ex_nn,i_ex_nnp
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-    ! N,N' loop. We fill every (N,N') exciton matrix element with the
-    ! contribution of the given k-point. The N loop is parallelized over
-    ! threads; the k-point loop (external to this routine) is serial.
-    ! Each thread writes to a disjoint nn slice of the module arrays so
-    ! there is no data race.
-
-    !$OMP PARALLEL DO PRIVATE(nnp,iv,ivp,ic,icp,nj), &  
-    !$OMP PRIVATE(i_ex_nn,i_ex_nnp,aux2,iright) 
-    do nn=1,norb_ex_cut		
-      do nnp=1,norb_ex_cut         
-        do ic=1,nc_ex
-          do iv=1,nv_ex
-            iright=0
-            call get_ex_index_first(nf,nv_ex,nc_ex,iright,ibz,i_ex_nn,ic,iv)			
-            do nj=1,3
-              qme_ex_inter1(nj,nn,nnp)=qme_ex_inter1(nj,nn,nnp)+ &
-                              complex(0.0d0,1.0d0)*conjg(fk_ex(i_ex_nn,nn))*fk_ex_der(nj,i_ex_nn,nnp)             
-              aux2=-complex(0.0d0,1.0d0)*fk_ex(i_ex_nn,nnp) &
-                *(berry_eigen_ex_band(ibz,nj,nv_ex+ic,nv_ex+ic)-berry_eigen_ex_band(ibz,nj,iv,iv))  
-
-              qme_ex_inter2(nj,nn,nnp)=qme_ex_inter2(nj,nn,nnp)+complex(0.0d0,1.0d0)*conjg(fk_ex(i_ex_nn,nn))*aux2
-              do icp=1,nc_ex
-                iright=0
-                call get_ex_index_first(nf,nv_ex,nc_ex,iright,ibz,i_ex_nnp,icp,iv)  
-                vme_ex_inter1(nj,nn,nnp)=vme_ex_inter1(nj,nn,nnp) &
-                                    +conjg(fk_ex(i_ex_nn,nn))*fk_ex(i_ex_nnp,nnp)* &
-                                    vme_ex_band(ibz,nj,nv_ex+ic,nv_ex+icp)
-                if (ic.ne.icp) then
-                  yme_ex_inter1(nj,nn,nnp)=yme_ex_inter1(nj,nn,nnp) &
-                                      +conjg(fk_ex(i_ex_nn,nn))*fk_ex(i_ex_nnp,nnp) &
-                                      *xme_ex_band(ibz,nj,nv_ex+ic,nv_ex+icp)
-                end if
-              end do
-
-              do ivp=1,nv_ex
-                iright=0
-                call get_ex_index_first(nf,nv_ex,nc_ex,iright,ibz,i_ex_nnp,ic,ivp)   					   
-                vme_ex_inter2(nj,nn,nnp)=vme_ex_inter2(nj,nn,nnp) &
-                                    -conjg(fk_ex(i_ex_nn,nn))*fk_ex(i_ex_nnp,nnp) &
-                                    *vme_ex_band(ibz,nj,ivp,iv)
-                if (iv.ne.ivp) then
-                  yme_ex_inter2(nj,nn,nnp)=yme_ex_inter2(nj,nn,nnp) &
-                                      -conjg(fk_ex(i_ex_nn,nn))*fk_ex(i_ex_nnp,nnp) &
-                                      *xme_ex_band(ibz,nj,ivp,iv)                 
-                end if
-              end do
-
-            end do
-          end do
-        end do
-      
+    !--- Step 1: index table ---
+    do ic = 1, nc_ex
+      do iv = 1, nv_ex
+        call get_ex_index_first(nf, nv_ex, nc_ex, 0, ibz, i_ex_table(ic,iv), ic, iv)
       end do
     end do
-    !$OMP END PARALLEL DO
+
+    !--- Step 2: F_cv(nn,idx) / FcvH(idx,nn) over the full (ic,iv) basis ---
+    ! (used only for the qme_ex_inter1/2 terms, which contract over the
+    !  FULL basis index and do not have the spectator-index restriction)
+    do ic = 1, nc_ex
+      do iv = 1, nv_ex
+        idx  = (ic-1)*nv_ex + iv
+        i_ex = i_ex_table(ic,iv)
+        do nn = 1, norb_ex_cut
+          F_cv(nn, idx) = fk_ex(i_ex, nn)
+        end do
+      end do
+    end do
+    do nn = 1, norb_ex_cut
+      do idx = 1, nbasis
+        FcvH(idx, nn) = conjg(F_cv(nn, idx))
+      end do
+    end do
+
+    do nj = 1, 3
+
+      !================================================================
+      ! vme_ex_inter1 / yme_ex_inter1:
+      !   sum_iv  Uc(iv)^H * B_cc * Uc(iv)   (and with Y_cc for yme)
+      ! where Uc(iv)(ic,nn) = fk_ex(i_ex_table(ic,iv), nn)
+      !================================================================
+      ! B_cc holds the velocity matrix elements (feeds vme_ex_inter1);
+      ! Y_cc holds the POSITION matrix elements xme_ex_band (feeds
+      ! yme_ex_inter1) — these are physically distinct quantities, Y_cc
+      ! is NOT simply B_cc with the diagonal removed. xme_ex_band already
+      ! has an exactly-zero diagonal by construction (see
+      ! get_ome_sp_xme_ex_band), so no further zeroing is strictly needed;
+      ! it is kept below only for clarity/parity with the reference code.
+      do ic = 1, nc_ex
+        do icp = 1, nc_ex
+          B_cc(ic,icp) = vme_ex_band(ibz, nj, nv_ex+ic, nv_ex+icp)
+          Y_cc(ic,icp) = xme_ex_band(ibz, nj, nv_ex+ic, nv_ex+icp)
+        end do
+      end do
+      do ic = 1, nc_ex
+        Y_cc(ic,ic) = czero
+      end do
+
+      out_v = czero
+      out_y = czero
+      do iv = 1, nv_ex
+        do ic = 1, nc_ex
+          Uc(ic,:) = fk_ex(i_ex_table(ic,iv), :)
+        end do
+
+        ! mid_cc = B_cc * Uc ; out_v += Uc^H * mid_cc
+        call zgemm('N', 'N', nc_ex, norb_ex_cut, nc_ex, &
+                    cone,  B_cc, nc_ex, &
+                           Uc,   nc_ex, &
+                    czero, mid_cc, nc_ex)
+        call zgemm('C', 'N', norb_ex_cut, norb_ex_cut, nc_ex, &
+                    cone, Uc,     nc_ex, &
+                          mid_cc, nc_ex, &
+                    cone, out_v,  norb_ex_cut)
+
+        ! mid_cc = Y_cc * Uc ; out_y += Uc^H * mid_cc
+        call zgemm('N', 'N', nc_ex, norb_ex_cut, nc_ex, &
+                    cone,  Y_cc, nc_ex, &
+                           Uc,   nc_ex, &
+                    czero, mid_cc, nc_ex)
+        call zgemm('C', 'N', norb_ex_cut, norb_ex_cut, nc_ex, &
+                    cone, Uc,     nc_ex, &
+                          mid_cc, nc_ex, &
+                    cone, out_y,  norb_ex_cut)
+      end do
+      vme_ex_inter1(nj,:,:) = vme_ex_inter1(nj,:,:) + out_v
+      yme_ex_inter1(nj,:,:) = yme_ex_inter1(nj,:,:) + out_y
+
+      !================================================================
+      ! vme_ex_inter2 / yme_ex_inter2:
+      !   -sum_ic  Wv(ic)^H * B_vv * Wv(ic)  (and with Y_vv for yme)
+      ! where Wv(ic)(iv,nn) = fk_ex(i_ex_table(ic,iv), nn)
+      !================================================================
+      ! Same distinction as above: B_vv is the velocity matrix (feeds
+      ! vme_ex_inter2), Y_vv is the POSITION matrix xme_ex_band (feeds
+      ! yme_ex_inter2) — not a zero-diagonal copy of B_vv.
+      do ivp = 1, nv_ex
+        do iv = 1, nv_ex
+          B_vv(iv,ivp) = vme_ex_band(ibz, nj, ivp, iv)
+          Y_vv(iv,ivp) = xme_ex_band(ibz, nj, ivp, iv)
+        end do
+      end do
+      do iv = 1, nv_ex
+        Y_vv(iv,iv) = czero
+      end do
+
+      out_v = czero
+      out_y = czero
+      do ic = 1, nc_ex
+        do iv = 1, nv_ex
+          Wv(iv,:) = fk_ex(i_ex_table(ic,iv), :)
+        end do
+
+        ! mid_vv = B_vv * Wv ; out_v += Wv^H * mid_vv
+        call zgemm('N', 'N', nv_ex, norb_ex_cut, nv_ex, &
+                    cone,  B_vv, nv_ex, &
+                           Wv,   nv_ex, &
+                    czero, mid_vv, nv_ex)
+        call zgemm('C', 'N', norb_ex_cut, norb_ex_cut, nv_ex, &
+                    cone, Wv,     nv_ex, &
+                          mid_vv, nv_ex, &
+                    cone, out_v,  norb_ex_cut)
+
+        ! mid_vv = Y_vv * Wv ; out_y += Wv^H * mid_vv
+        call zgemm('N', 'N', nv_ex, norb_ex_cut, nv_ex, &
+                    cone,  Y_vv, nv_ex, &
+                           Wv,   nv_ex, &
+                    czero, mid_vv, nv_ex)
+        call zgemm('C', 'N', norb_ex_cut, norb_ex_cut, nv_ex, &
+                    cone, Wv,     nv_ex, &
+                          mid_vv, nv_ex, &
+                    cone, out_y,  norb_ex_cut)
+      end do
+      vme_ex_inter2(nj,:,:) = vme_ex_inter2(nj,:,:) - out_v
+      yme_ex_inter2(nj,:,:) = yme_ex_inter2(nj,:,:) - out_y
+
+      !================================================================
+      ! qme_ex_inter1 += i * FcvH^T * D_c
+      !================================================================
+      do ic = 1, nc_ex
+        do iv = 1, nv_ex
+          idx = (ic-1)*nv_ex + iv
+          D_c(idx, :) = fk_ex_der(nj, i_ex_table(ic,iv), :)
+        end do
+      end do
+      call zgemm('T', 'N', norb_ex_cut, norb_ex_cut, nbasis, &
+                  ci,    FcvH, nbasis,       &
+                         D_c,  nbasis,        &
+                  czero, out_q, norb_ex_cut)
+      qme_ex_inter1(nj,:,:) = qme_ex_inter1(nj,:,:) + out_q
+
+      !================================================================
+      ! qme_ex_inter2 += i * FcvH^T * A_c,  A_c = -i * fk_ex * berry_shift
+      ! (the "-i" is essential — dropping it rotates this term by 90 deg)
+      !================================================================
+      do ic = 1, nc_ex
+        do iv = 1, nv_ex
+          idx  = (ic-1)*nv_ex + iv
+          i_ex = i_ex_table(ic,iv)
+          berry_shift = dble(berry_eigen_ex_band(ibz,nj,nv_ex+ic,nv_ex+ic)) &
+                      - dble(berry_eigen_ex_band(ibz,nj,iv,iv))
+          A_c(idx, :) = -ci * fk_ex(i_ex, :) * berry_shift
+        end do
+      end do
+      call zgemm('T', 'N', norb_ex_cut, norb_ex_cut, nbasis, &
+                  ci,    FcvH, nbasis,       &
+                         A_c,  nbasis,        &
+                  czero, out_q, norb_ex_cut)
+      qme_ex_inter2(nj,:,:) = qme_ex_inter2(nj,:,:) + out_q
+
+    end do ! nj
 
   end subroutine get_ome_inter_ex_sum_k
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine write_ome_ex_linear(vme_ex)
     implicit none
-    integer nn,nj
-    dimension vme_ex(3,norb_ex_cut)
-    complex*16 vme_ex
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    open(10,file='ome_linear_ex_'//trim(material_name)//'.omeex') 
-    write(10,*) 1    
-    do nn=1,norb_ex_cut
-      write(10,*) nn,(realpart(vme_ex(nj,nn)),aimag(vme_ex(nj,nn)), nj=1,3)
+    complex(8), intent(in) :: vme_ex(3, norb_ex_cut)
+    integer :: nn, nj
+    open(10, file='ome_linear_ex_'//trim(material_name)//'.omeex')
+    write(10,*) 1
+    do nn = 1, norb_ex_cut
+      write(10,*) nn, (dble(vme_ex(nj,nn)), dimag(vme_ex(nj,nn)), nj=1,3)
     end do
     close(10)
   end subroutine write_ome_ex_linear
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine write_ome_ex_linear_kresolved_init(unitno, mat_name, norb_ex_cut)
     implicit none
-    integer, intent(in) :: unitno, norb_ex_cut
+    integer,          intent(in) :: unitno, norb_ex_cut
     character(len=*), intent(in) :: mat_name
-
     open(unitno, file='ome_linear_ex_k_'//trim(mat_name)//'.omeexk', status='replace')
     write(unitno,*) 1
     write(unitno,*) norb_ex_cut
   end subroutine write_ome_ex_linear_kresolved_init
 
-
   subroutine write_ome_ex_linear_kresolved_point(unitno, kx, ky, kz, norb_ex_cut, vme_ex_k)
     implicit none
-    integer, intent(in) :: unitno, norb_ex_cut
-    real*8, intent(in) :: kx, ky, kz
-    complex*16, intent(in) :: vme_ex_k(3, norb_ex_cut)
-
+    integer,    intent(in) :: unitno, norb_ex_cut
+    real(8),    intent(in) :: kx, ky, kz
+    complex(8), intent(in) :: vme_ex_k(3, norb_ex_cut)
     integer :: nn
     write(unitno,*) kx, ky, kz
     do nn = 1, norb_ex_cut
@@ -436,100 +543,79 @@ end subroutine get_ome_ex
     end do
   end subroutine write_ome_ex_linear_kresolved_point
 
-
   subroutine write_ome_ex_linear_kresolved_close(unitno)
     implicit none
     integer, intent(in) :: unitno
     close(unitno)
   end subroutine write_ome_ex_linear_kresolved_close
 
-
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
-  subroutine read_ome_sp_linear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  subroutine read_ome_sp_linear(iflag_norder, npointstotal, nband_ex, vme_ex_band, ek)
     implicit none
-    integer iflag_norder
-    integer npointstotal,nband_ex
-    integer ibz
-    integer nj,i,j
-
-    dimension ek(npointstotal,nband_ex)
-    dimension vme_ex_band(npointstotal,3,nband_ex,nband_ex)
-    
-    real*8 :: ek
-    real*8 :: a1,a2,a3,b1,b2,b3,b4,b5,b6
-    complex*16 vme_ex_band
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    open(10,file='ome_linear_sp_'//trim(material_name)//'.omesp')     
-    read(10,*) iflag_norder
-    do ibz=1,npointstotal
-      read(10,*) a1,a2,a3,(ek(ibz,j),j=1,nband_ex)	
-      do i=1,nband_ex			
-        do j=1,nband_ex
-          read(10,*) a1,a2,a3,b1,b2,b3,b4,b5,b6
-          vme_ex_band(ibz,1,i,j)=complex(b1,b2)
-          vme_ex_band(ibz,2,i,j)=complex(b3,b4)
-          vme_ex_band(ibz,3,i,j)=complex(b5,b6)
+    integer,    intent(in)  :: iflag_norder, npointstotal, nband_ex
+    real(8),    intent(out) :: ek(npointstotal, nband_ex)
+    complex(8), intent(out) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    integer :: ibz, i, j, iflag_r
+    real(8) :: a1, a2, a3, b1, b2, b3, b4, b5, b6
+    open(10, file='ome_linear_sp_'//trim(material_name)//'.omesp')
+    read(10,*) iflag_r
+    do ibz = 1, npointstotal
+      read(10,*) a1, a2, a3, (ek(ibz,j), j=1,nband_ex)
+      do i = 1, nband_ex
+        do j = 1, nband_ex
+          read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
+          vme_ex_band(ibz,1,i,j) = cmplx(b1,b2,8)
+          vme_ex_band(ibz,2,i,j) = cmplx(b3,b4,8)
+          vme_ex_band(ibz,3,i,j) = cmplx(b5,b6,8)
         end do
       end do
     end do
     close(10)
   end subroutine read_ome_sp_linear
 
-  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
-  subroutine read_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,berry_eigen_ex_band, &
-                                   gen_der_ex_band,shift_vector_ex_band,vme_ex_band,ek)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  subroutine read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, &
+                                    berry_eigen_ex_band, gen_der_ex_band, &
+                                    shift_vector_ex_band, vme_ex_band, ek)
     implicit none
-    integer iflag_norder
-    integer npointstotal,nband_ex
-    integer ibz
-    integer nj,i,j
-
-    dimension ek(npointstotal,nband_ex)
-    dimension vme_ex_band(npointstotal,3,nband_ex,nband_ex)
-    dimension berry_eigen_ex_band(npointstotal,3,nband_ex,nband_ex)
-    dimension gen_der_ex_band(npointstotal,3,3,nband_ex,nband_ex)
-    dimension shift_vector_ex_band(npointstotal,3,3,nband_ex,nband_ex)
-
-    real*8 :: ek
-    real*8 :: a1,a2,a3,b1,b2,b3,b4,b5,b6
-    real*8 :: shift_vector_ex_band
-    complex*16 vme_ex_band
-    complex*16 berry_eigen_ex_band
-    complex*16 gen_der_ex_band
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    open(10,file='ome_nonlinear_sp_'//trim(material_name)//'.omesp')     
-    read(10,*) iflag_norder
-    do ibz=1,npointstotal
-      read(10,*) a1,a2,a3,(ek(ibz,j),j=1,nband_ex)	
-      do i=1,nband_ex			
-        do j=1,nband_ex
-          read(10,*) a1,a2,a3,b1,b2,b3,b4,b5,b6
-          vme_ex_band(ibz,1,i,j)=complex(b1,b2)
-          vme_ex_band(ibz,2,i,j)=complex(b3,b4)
-          vme_ex_band(ibz,3,i,j)=complex(b5,b6)
-          read(10,*) a1,a2,a3,b1,b2,b3,b4,b5,b6
-          berry_eigen_ex_band(ibz,1,i,j)=complex(b1,b2)
-          berry_eigen_ex_band(ibz,2,i,j)=complex(b3,b4)
-          berry_eigen_ex_band(ibz,3,i,j)=complex(b5,b6)
-          do nj=1,3
-            read(10,*) a1,a2,a3,b1,b2,b3
-            shift_vector_ex_band(ibz,nj,1,i,j)=b1
-            shift_vector_ex_band(ibz,nj,2,i,j)=b2
-            shift_vector_ex_band(ibz,nj,3,i,j)=b3
+    integer, intent(in)  :: iflag_norder, npointstotal, nband_ex
+    real(8), intent(out) :: ek(npointstotal, nband_ex)
+    real(8), intent(out) :: shift_vector_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+    complex(8), intent(out) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(out) :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(out) :: gen_der_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+    integer :: ibz, i, j, nj, iflag_r
+    real(8) :: a1, a2, a3, b1, b2, b3, b4, b5, b6
+    open(10, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp')
+    read(10,*) iflag_r
+    do ibz = 1, npointstotal
+      read(10,*) a1, a2, a3, (ek(ibz,j), j=1,nband_ex)
+      do i = 1, nband_ex
+        do j = 1, nband_ex
+          read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
+          vme_ex_band(ibz,1,i,j) = cmplx(b1,b2,8)
+          vme_ex_band(ibz,2,i,j) = cmplx(b3,b4,8)
+          vme_ex_band(ibz,3,i,j) = cmplx(b5,b6,8)
+          read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
+          berry_eigen_ex_band(ibz,1,i,j) = cmplx(b1,b2,8)
+          berry_eigen_ex_band(ibz,2,i,j) = cmplx(b3,b4,8)
+          berry_eigen_ex_band(ibz,3,i,j) = cmplx(b5,b6,8)
+          do nj = 1, 3
+            read(10,*) a1, a2, a3, b1, b2, b3
+            shift_vector_ex_band(ibz,nj,1,i,j) = b1
+            shift_vector_ex_band(ibz,nj,2,i,j) = b2
+            shift_vector_ex_band(ibz,nj,3,i,j) = b3
           end do
-          do nj=1,3
-            read(10,*) a1,a2,a3,b1,b2,b3,b4,b5,b6
-            gen_der_ex_band(ibz,nj,1,i,j)=complex(b1,b2)
-            gen_der_ex_band(ibz,nj,2,i,j)=complex(b3,b4)
-            gen_der_ex_band(ibz,nj,3,i,j)=complex(b5,b6)
+          do nj = 1, 3
+            read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
+            gen_der_ex_band(ibz,nj,1,i,j) = cmplx(b1,b2,8)
+            gen_der_ex_band(ibz,nj,2,i,j) = cmplx(b3,b4,8)
+            gen_der_ex_band(ibz,nj,3,i,j) = cmplx(b5,b6,8)
           end do
         end do
       end do
-    end do	  
+    end do
     close(10)
-
   end subroutine read_ome_sp_nonlinear
-
-
 
 end module ome_ex
