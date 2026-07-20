@@ -535,50 +535,37 @@ contains
       close(10)
    end subroutine write_ome_sp_linear
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-   subroutine write_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek,gen_der_ex_band, &
-      shift_vector_ex_band,berry_eigen_ex_band)
-      implicit none
-      integer iflag_norder
-      integer npointstotal,nband_ex
-      integer ibz
-      integer nj,i,j
- 
-      dimension ek(npointstotal,nband_ex)
-      dimension vme_ex_band(npointstotal,3,nband_ex,nband_ex)
-      dimension berry_eigen_ex_band(npointstotal,3,nband_ex,nband_ex)
-      dimension gen_der_ex_band(npointstotal,3,3,nband_ex,nband_ex)
-      dimension shift_vector_ex_band(npointstotal,3,3,nband_ex,nband_ex)
- 
-      real*8 ek
-      real*8 shift_vector_ex_band
-      complex*16 vme_ex_band
-      complex*16 berry_eigen_ex_band
-      complex*16 gen_der_ex_band
-      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-      open(10,file='ome_nonlinear_sp_'//trim(material_name)//'.omesp')
-      write(10,*) iflag_norder
-      do ibz=1,npointstotal
-         write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(ek(ibz,j),j=1,nband_ex)
-         do i=1,nband_ex
-            do j=1,nband_ex
-               write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz), &
-                  (realpart(vme_ex_band(ibz,nj,i,j)),aimag(vme_ex_band(ibz,nj,i,j)), nj=1,3)
-               write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(realpart(berry_eigen_ex_band(ibz,nj,i,j)), &
-                  aimag(berry_eigen_ex_band(ibz,nj,i,j)), nj=1,3)
-               write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(shift_vector_ex_band(ibz,1,nj,i,j), nj=1,3)
-               write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(shift_vector_ex_band(ibz,2,nj,i,j), nj=1,3)
-               write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(shift_vector_ex_band(ibz,3,nj,i,j), nj=1,3)
-               write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(realpart(gen_der_ex_band(ibz,1,nj,i,j)), &
-                  aimag(gen_der_ex_band(ibz,1,nj,i,j)), nj=1,3)
-               write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(realpart(gen_der_ex_band(ibz,2,nj,i,j)), &
-                  aimag(gen_der_ex_band(ibz,2,nj,i,j)), nj=1,3)
-               write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(realpart(gen_der_ex_band(ibz,3,nj,i,j)), &
-                  aimag(gen_der_ex_band(ibz,3,nj,i,j)), nj=1,3)
+      subroutine write_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek, &
+            gen_der_ex_band,shift_vector_ex_band,berry_eigen_ex_band)
+            implicit none
+            integer iflag_norder,npointstotal,nband_ex,ibz
+
+            dimension ek(npointstotal,nband_ex)
+            dimension vme_ex_band(npointstotal,3,nband_ex,nband_ex)
+            dimension berry_eigen_ex_band(npointstotal,3,nband_ex,nband_ex)
+            dimension gen_der_ex_band(npointstotal,3,3,nband_ex,nband_ex)
+            dimension shift_vector_ex_band(npointstotal,3,3,nband_ex,nband_ex)
+
+            real*8 ek, shift_vector_ex_band
+            complex*16 vme_ex_band, berry_eigen_ex_band, gen_der_ex_band
+
+            open(10, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp', &
+                  form='unformatted', access='stream', status='replace')
+
+            write(10) iflag_norder
+            write(10) npointstotal, nband_ex
+            write(10) rkxvector, rkyvector, rkzvector     ! once, not per band pair
+
+            do ibz=1,npointstotal
+                  write(10) ek(ibz,:)
+                  write(10) vme_ex_band(ibz,:,:,:)
+                  write(10) berry_eigen_ex_band(ibz,:,:,:)
+                  write(10) shift_vector_ex_band(ibz,:,:,:,:)
+                  write(10) gen_der_ex_band(ibz,:,:,:,:)
             end do
-         end do
-      end do
-      close(10)
-   end subroutine write_ome_sp_nonlinear
+
+            close(10)
+      end subroutine write_ome_sp_nonlinear
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    ! This routine evaluates the alpha,alpha' matrices
    subroutine get_vme_kernels_ome(rkx,rky,rkz,norb,skernel,sderkernel, &

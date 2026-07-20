@@ -577,45 +577,33 @@ contains
   subroutine read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, &
                                     berry_eigen_ex_band, gen_der_ex_band, &
                                     shift_vector_ex_band, vme_ex_band, ek)
-    implicit none
-    integer, intent(in)  :: iflag_norder, npointstotal, nband_ex
-    real(8), intent(out) :: ek(npointstotal, nband_ex)
-    real(8), intent(out) :: shift_vector_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
-    complex(8), intent(out) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
-    complex(8), intent(out) :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
-    complex(8), intent(out) :: gen_der_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
-    integer :: ibz, i, j, nj, iflag_r
-    real(8) :: a1, a2, a3, b1, b2, b3, b4, b5, b6
-    open(10, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp')
-    read(10,*) iflag_r
-    do ibz = 1, npointstotal
-      read(10,*) a1, a2, a3, (ek(ibz,j), j=1,nband_ex)
-      do i = 1, nband_ex
-        do j = 1, nband_ex
-          read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
-          vme_ex_band(ibz,1,i,j) = cmplx(b1,b2,8)
-          vme_ex_band(ibz,2,i,j) = cmplx(b3,b4,8)
-          vme_ex_band(ibz,3,i,j) = cmplx(b5,b6,8)
-          read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
-          berry_eigen_ex_band(ibz,1,i,j) = cmplx(b1,b2,8)
-          berry_eigen_ex_band(ibz,2,i,j) = cmplx(b3,b4,8)
-          berry_eigen_ex_band(ibz,3,i,j) = cmplx(b5,b6,8)
-          do nj = 1, 3
-            read(10,*) a1, a2, a3, b1, b2, b3
-            shift_vector_ex_band(ibz,nj,1,i,j) = b1
-            shift_vector_ex_band(ibz,nj,2,i,j) = b2
-            shift_vector_ex_band(ibz,nj,3,i,j) = b3
-          end do
-          do nj = 1, 3
-            read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
-            gen_der_ex_band(ibz,nj,1,i,j) = cmplx(b1,b2,8)
-            gen_der_ex_band(ibz,nj,2,i,j) = cmplx(b3,b4,8)
-            gen_der_ex_band(ibz,nj,3,i,j) = cmplx(b5,b6,8)
-          end do
-        end do
-      end do
-    end do
-    close(10)
+   implicit none
+   integer, intent(in)  :: iflag_norder, npointstotal, nband_ex
+   real(8), intent(out) :: ek(npointstotal, nband_ex)
+   real(8), intent(out) :: shift_vector_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+   complex(8), intent(out) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+   complex(8), intent(out) :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
+   complex(8), intent(out) :: gen_der_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+   integer :: ibz, iflag_r, npts_r, nband_r
+   real(8), allocatable :: rkx_r(:), rky_r(:), rkz_r(:)
+
+   open(10, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp', &
+        form='unformatted', access='stream', status='old')
+
+   read(10) iflag_r
+   read(10) npts_r, nband_r
+   allocate(rkx_r(npts_r), rky_r(npts_r), rkz_r(npts_r))
+   read(10) rkx_r, rky_r, rkz_r
+
+   do ibz = 1, npointstotal
+      read(10) ek(ibz,:)
+      read(10) vme_ex_band(ibz,:,:,:)
+      read(10) berry_eigen_ex_band(ibz,:,:,:)
+      read(10) shift_vector_ex_band(ibz,:,:,:,:)
+      read(10) gen_der_ex_band(ibz,:,:,:,:)
+   end do
+
+   close(10)
   end subroutine read_ome_sp_nonlinear
 
 end module ome_ex

@@ -224,10 +224,12 @@ subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
     integer :: iw
     real(8) :: feps
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-    feps = 6.623618d-03 * 1.0d+06 * (27.211386d0**(-2)) &
-         * 5.291772d-11 * 1.0d+09
-
+    !feps=-6.623618d-03/(27.21138**2)*1.0d06 !%go from au to (\mu A /V^2)*Angstrongs
+    !d=2.6d0 !thickness in angstrongs for MoS2
+    !d=3.28d0 !thickness in angstrongs for h-BN
+    !feps=feps/(d/0.52917721067121d0) 
+    feps=(6.623618d-03)*(1.0d+06)*(27.211386**(-2))*(5.291772d-11)*(1.0d+09) !%go from au to (\mu A /V^2)*nm
+   
     open(90, file='shift_ex_lengthgauge_'//trim(material_name)//'.dat')
 
     !$omp parallel do schedule(static) ordered private(iw)
