@@ -81,31 +81,33 @@ module sigma_first_ex
   end subroutine read_ome_ex_linear
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine get_kubo_intens_ex(vme_ex,nw,wp,eta1,sigma_w_ex)
-  implicit none
-  dimension skubo_ex_int(3,norb_ex_cut,norb_ex_cut)
-  dimension wp(nw),sigma_w_ex(3,3,nw)
-  dimension vme_ex(3,norb_ex_cut)
-  
-  integer nw
-  integer iw,nn,nj,njp
-  real*8 delta_n_ex
-  real*8 wp,eta1
-  
-  complex*16 :: vme_ex
-  complex*16 :: skubo_ex_int, sigma_w_ex
+    implicit none
+    !dimension skubo_ex_int(3,3,norb_ex_cut)
+    
+    dimension wp(nw),sigma_w_ex(3,3,nw)
+    dimension vme_ex(3,norb_ex_cut)
+    
+    integer nw
+    integer iw,nn,nj,njp
+    real*8 delta_n_ex
+    real*8 wp,eta1
+    
+    complex*16 :: vme_ex
+    complex*16 :: skubo_ex_int, sigma_w_ex
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	  
     skubo_ex_int=0.0d0
     sigma_w_ex=0.0d0
-
-    do iw=1,nw  
-      do nn=1,norb_ex_cut
-	      do nj=1,3
-	        do njp=1,3
+     
+    do nn=1,norb_ex_cut
+      do nj=1,3
+        do njp=1,3
             
             !N integrand
-            skubo_ex_int(nj,njp,nn)=pi/(dble(npointstotal)*vcell) &
+            skubo_ex_int=pi/(dble(npointstotal)*vcell) &
             *conjg(vme_ex(nj,nn))*vme_ex(njp,nn)/e_ex(nn)   !pick the correct order of operators
             
+            
+          do iw=1,nw 
             !at a given frequency
             !delta function
             if (trim(broadening_type_text) == 'gaussian') then
@@ -118,11 +120,12 @@ module sigma_first_ex
               delta_n_ex = pi*1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*&
                 exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
             end if
+            
             !sigma_w
-            sigma_w_ex(nj,njp,iw)=sigma_w_ex(nj,njp,iw)+skubo_ex_int(nj,njp,nn)*delta_n_ex
+            sigma_w_ex(nj,njp,iw)=sigma_w_ex(nj,njp,iw)+skubo_ex_int*delta_n_ex
           
-	        end do
-	      end do
+          end do
+        end do
       end do
     end do  
 
@@ -142,9 +145,8 @@ module sigma_first_ex
     !write frequency dependent conductivity	  
     open(50,file='sigma_first_ex_real_'//trim(material_name)//'.dat')
     open(55,file='sigma_first_ex_imag_'//trim(material_name)//'.dat')
-
+    feps=1.0d0 !use atomic units
     do iw=1,nw
-      feps=1.0d0 !use atomic units
       write(50,*) wp(iw)*27.211385d0, &
         realpart(feps*sigma_w_ex(1,1,iw)), &
         realpart(feps*sigma_w_ex(1,2,iw)), &

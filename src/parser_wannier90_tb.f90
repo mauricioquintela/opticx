@@ -103,7 +103,7 @@ contains
          do ialphap=1,norb
             do ialpha=1,norb
                read(fp,*) nkk1,nkk2,a1,a2
-               hhop(iR,nkk1,nkk2)=complex(a1,a2)
+               hhop(iR,nkk1,nkk2)=complex(a1,a2)/Degen(iR)
             end do
          end do
          read(fp,*)

@@ -378,11 +378,11 @@ module exciton_envelopes
         xc_bz=xc-dble(int(xc/0.5d0)); yc_bz=yc-dble(int(yc/0.5d0)); zc_bz=0.0d0
         xp_bz=xc_bz*G(1,1)+yc_bz*G(2,1); yp_bz=xc_bz*G(1,2)+yc_bz*G(2,2); zp_bz=0.0d0
       elseif (active_x .and. active_z) then
-        xc=(xp*G(3,3)-G(3,1)*yp)/(G(1,1)*G(3,3)-G(3,1)*G(1,3))
+        xc=(xp*G(3,3)-G(3,1)*zp)/(G(1,1)*G(3,3)-G(3,1)*G(1,3))
         yc=0.0d0
-        zc=(G(1,1)*yp-xp*G(1,3))/(G(1,1)*G(3,3)-G(3,1)*G(1,3))
+        zc=(G(1,1)*zp-xp*G(1,3))/(G(1,1)*G(3,3)-G(3,1)*G(1,3))
         xc_bz=xc-dble(int(xc/0.5d0)); yc_bz=0.0d0; zc_bz=zc-dble(int(zc/0.5d0))
-        xp_bz=xc_bz*G(1,1)+yc_bz*G(3,1); yp_bz=0.0d0; zp_bz=xc_bz*G(1,3)+yc_bz*G(3,3)
+        xp_bz=xc_bz*G(1,1)+zc_bz*G(3,1); yp_bz=0.0d0; zp_bz=xc_bz*G(1,3)+zc_bz*G(3,3)
       else
         xc=0.0d0
         yc=(yp*G(3,3)-G(3,2)*zp)/(G(2,2)*G(3,3)-G(3,2)*G(2,3))
