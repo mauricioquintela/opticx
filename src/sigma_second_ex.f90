@@ -59,6 +59,7 @@ module sigma_second_ex
 
 
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
 subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
     use omp_lib
     implicit none
@@ -70,6 +71,10 @@ subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
     real(8)     :: omegap, omegaq, omega2
     complex(8)  :: shift_kernel_ex1, shift_kernel_ex
     ! sigma_w_ex_intra is per-iw — declare as a local scalar accumulator
+    ! PATCH: computation of this term is commented out below (dead output —
+    ! never returned, printed, or combined with sigma_w_ex). Left declared
+    ! and zeroed so it's a one-line change to re-enable if the intraband
+    ! ("nn==nnp") contribution turns out to be needed later.
     complex(8)  :: sigma_w_ex_intra(3,3,3,nw)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
@@ -92,10 +97,18 @@ subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
           do njp = 1, 3
             do njpp = 1, 3
 
-              call get_shift_kernel_ex(eta2, nj, njp, njpp, nn, nn, &
-                                       omegap, omegaq, omega2, shift_kernel_ex)
-              sigma_w_ex_intra(nj,njp,njpp,iw) = sigma_w_ex_intra(nj,njp,njpp,iw) &
-                + 1.0d0 / (dble(npointstotal) * vcell) * shift_kernel_ex
+              ! PATCH: intraband (nn==nnp) term commented out — it was
+              ! computed at real cost (one extra get_shift_kernel_ex call
+              ! per (nn,nj,njp,njpp,iw), i.e. an additional
+              ! O(norb_ex_cut*27*nw) kernel evaluations) but never used
+              ! downstream: not returned from this subroutine, not printed,
+              ! not combined with sigma_w_ex. Commenting it out removes
+              ! that dead work.
+              !
+              ! call get_shift_kernel_ex(eta2, nj, njp, njpp, nn, nn, &
+              !                          omegap, omegaq, omega2, shift_kernel_ex)
+              ! sigma_w_ex_intra(nj,njp,njpp,iw) = sigma_w_ex_intra(nj,njp,njpp,iw) &
+              !   + 1.0d0 / (dble(npointstotal) * vcell) * shift_kernel_ex
 
               do nnp = 1, norb_ex_cut
                 call get_shift_kernel_ex(eta2, nj, njp, njpp, nn, nnp, &
@@ -188,14 +201,14 @@ subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
       end if
 
       if (ihuang .eq. 1) then
-        d1 = 1.0d0 / (omegap + e_ex(nnp) + eta2p)
-        d2 = 1.0d0 / (omegap - e_ex(nnp) + eta2p)
-        d3 = 1.0d0 / (omegap - e_ex(nn)  + eta2p)
-        d4 = 1.0d0 / (omegap - e_ex(nnp) + eta2p)
-        d5 = 1.0d0 / (-omegap + e_ex(nnp) - eta2p)
-        d6 = 1.0d0 / (-omegap - e_ex(nnp) + eta2p)
-        d7 = 1.0d0 / (-omegap - e_ex(nn)  + eta2p)
-        d8 = 1.0d0 / (-omegap - e_ex(nnp) + eta2p)
+        d1 = 1.0d0 / (omegap + e_ex(nnp) + eta2)
+        d2 = 1.0d0 / (omegap - e_ex(nnp) + eta2)
+        d3 = 1.0d0 / (omegap - e_ex(nn)  + eta2)
+        d4 = 1.0d0 / (omegap - e_ex(nnp) + eta2)
+        d5 = 1.0d0 / (-omegap + e_ex(nnp) - eta2)
+        d6 = 1.0d0 / (-omegap - e_ex(nnp) + eta2)
+        d7 = 1.0d0 / (-omegap - e_ex(nn)  + eta2)
+        d8 = 1.0d0 / (-omegap - e_ex(nnp) + eta2)
 
         aux1 =  cmplx(0.0d0,1.0d0,8)*xme_ex(nj1,nn)*conjg(xme_ex_inter(nj2,nn,nnp))*conjg(xme_ex(nj3,nnp))*d1
         aux2 =  cmplx(0.0d0,1.0d0,8)*conjg(xme_ex(nj1,nn))*xme_ex_inter(nj2,nn,nnp)*xme_ex(nj3,nnp)*d2

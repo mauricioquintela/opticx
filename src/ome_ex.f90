@@ -69,6 +69,18 @@ contains
     allocate(ek(npointstotal, nband_ex))
     allocate(vme_ex_band(npointstotal, 3, nband_ex, nband_ex))
 
+    ! PATCH: xme_ex_band is now allocated and zeroed UNCONDITIONALLY, not
+    ! only inside the iflag_norder==2 branch. get_ome_gs_ex_sum_k reads
+    ! xme_ex_band(ibz,nj,iv,nv_ex+ic) on every call regardless of
+    ! iflag_norder, with no guard of its own -- for iflag_norder==1 that
+    ! was previously a read of an UNALLOCATED allocatable array (undefined
+    ! behaviour, most likely a crash). Allocating it here and leaving it
+    ! zeroed for the linear case makes that read well-defined; the value
+    ! it contributes (xme_ex accumulation) is simply never written out or
+    ! otherwise used when iflag_norder==1, so this changes no output.
+    allocate(xme_ex_band(npointstotal, 3, nband_ex, nband_ex))
+    xme_ex_band = (0.0d0, 0.0d0)
+
     if (iflag_norder == 1) then
       ek = 0.0d0
       vme_ex_band = (0.0d0, 0.0d0)
@@ -80,7 +92,8 @@ contains
       allocate(berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex))
       allocate(gen_der_ex_band(npointstotal, 3, 3, nband_ex, nband_ex))
       allocate(shift_vector_ex_band(npointstotal, 3, 3, nband_ex, nband_ex))
-      allocate(xme_ex_band(npointstotal, 3, nband_ex, nband_ex))
+      ! PATCH: xme_ex_band allocation moved above -- removed the duplicate
+      ! `allocate(xme_ex_band(...))` that used to live here.
       ek = 0.0d0
       vme_ex_band          = (0.0d0, 0.0d0)
       berry_eigen_ex_band  = (0.0d0, 0.0d0)
@@ -90,7 +103,7 @@ contains
       call read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, &
                                   berry_eigen_ex_band, gen_der_ex_band, &
                                   shift_vector_ex_band, vme_ex_band, ek)
-      xme_ex_band = (0.0d0, 0.0d0)
+      ! xme_ex_band already zeroed above; overwritten here with real values.
       call get_ome_sp_xme_ex_band(ek, vme_ex_band, xme_ex_band)
     end if
 
@@ -194,22 +207,14 @@ contains
     write(*,*) '   Optical matrix elements (ex, N->GS) written'
     write(*,*) '   Optical matrix elements (ex, N->N'') not printed in this version'
 
-    deallocate(ek, vme_ex_band)
+    ! PATCH: xme_ex_band is now unconditionally allocated above, so it
+    ! must be unconditionally deallocated here too (previously this was
+    ! only deallocated when iflag_norder==2).
+    deallocate(ek, vme_ex_band, xme_ex_band)
     if (iflag_norder == 2) &
-      deallocate(berry_eigen_ex_band, gen_der_ex_band, shift_vector_ex_band, xme_ex_band)
-!     if (iflag_norder == 2) then
-!       open(99, file='debug_inter_nj2.dat')
-!       do nn = 1, norb_ex_cut
-!         do nnp = 1, norb_ex_cut
-!           write(99,'(2I8,8E20.10)') nn, nnp, &
-!             vme_ex_inter1(2,nn,nnp), vme_ex_inter2(2,nn,nnp), &
-!             yme_ex_inter1(2,nn,nnp), yme_ex_inter2(2,nn,nnp)
-!         end do
-!       end do
-!       close(99)
-!     end if
-  end subroutine get_ome_ex
+      deallocate(berry_eigen_ex_band, gen_der_ex_band, shift_vector_ex_band)
 
+  end subroutine get_ome_ex
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine get_ome_sp_xme_ex_band(ek, vme_ex_band, xme_ex_band)
     implicit none
@@ -605,5 +610,50 @@ contains
 
    close(10)
   end subroutine read_ome_sp_nonlinear
+  
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!   subroutine read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, &
+!                                     berry_eigen_ex_band, gen_der_ex_band, &
+!                                     shift_vector_ex_band, vme_ex_band, ek)
+!     implicit none
+!     integer, intent(in)  :: iflag_norder, npointstotal, nband_ex
+!     real(8), intent(out) :: ek(npointstotal, nband_ex)
+!     real(8), intent(out) :: shift_vector_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+!     complex(8), intent(out) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+!     complex(8), intent(out) :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
+!     complex(8), intent(out) :: gen_der_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+!     integer :: ibz, i, j, nj, iflag_r
+!     real(8) :: a1, a2, a3, b1, b2, b3, b4, b5, b6
+!     open(10, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp')
+!     read(10,*) iflag_r
+!     do ibz = 1, npointstotal
+!       read(10,*) a1, a2, a3, (ek(ibz,j), j=1,nband_ex)
+!       do i = 1, nband_ex
+!         do j = 1, nband_ex
+!           read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
+!           vme_ex_band(ibz,1,i,j) = cmplx(b1,b2,8)
+!           vme_ex_band(ibz,2,i,j) = cmplx(b3,b4,8)
+!           vme_ex_band(ibz,3,i,j) = cmplx(b5,b6,8)
+!           read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
+!           berry_eigen_ex_band(ibz,1,i,j) = cmplx(b1,b2,8)
+!           berry_eigen_ex_band(ibz,2,i,j) = cmplx(b3,b4,8)
+!           berry_eigen_ex_band(ibz,3,i,j) = cmplx(b5,b6,8)
+!           do nj = 1, 3
+!             read(10,*) a1, a2, a3, b1, b2, b3
+!             shift_vector_ex_band(ibz,nj,1,i,j) = b1
+!             shift_vector_ex_band(ibz,nj,2,i,j) = b2
+!             shift_vector_ex_band(ibz,nj,3,i,j) = b3
+!           end do
+!           do nj = 1, 3
+!             read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
+!             gen_der_ex_band(ibz,nj,1,i,j) = cmplx(b1,b2,8)
+!             gen_der_ex_band(ibz,nj,2,i,j) = cmplx(b3,b4,8)
+!             gen_der_ex_band(ibz,nj,3,i,j) = cmplx(b5,b6,8)
+!           end do
+!         end do
+!       end do
+!     end do
+!     close(10)
+!   end subroutine read_ome_sp_nonlinear
 
 end module ome_ex
