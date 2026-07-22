@@ -18,6 +18,7 @@ module parser_input_file
   public :: nband_index
   public :: norb_ex_cut
   public :: broadening_type_text
+  !public :: do_write_exk
   public :: read_line_numbers_int !subroutine
 
   character(len=1000) :: material_name_in
@@ -26,6 +27,7 @@ module parser_input_file
   character(len=100) :: iflag_ome_sp_text
   character(len=100) :: iflag_ome_ex_text
   character(len=100) :: broadening_type_text
+  !character(len=100) :: do_write_exk
   character(len=1000) :: xatu_eigval_filepath_in
   character(len=1000) :: xatu_states_filepath_in
   character(len=100) :: response_text
@@ -87,6 +89,7 @@ module parser_input_file
       response_found = .false.
       energy_found = .false.
       exciton_found = .false.
+      !write_exk_found = .false.
       ! default broadening
       broadening_type_text = 'gaussian'
       
@@ -156,6 +159,10 @@ module parser_input_file
           else if (index(param_name, 'Response') > 0) then
             read(10,*) response_text
             response_found = .true.
+            
+!           else if (index(param_name, 'Write_ex_kresolved') > 0) then
+!             read(10,*) write_exk_text
+!             write_exk_found = .true.
             
           else if (index(param_name, 'Energy_variables') > 0) then
             read(10,*) e1, e2, eta, nw

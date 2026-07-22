@@ -30,6 +30,7 @@ contains
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine get_ome_ex(iflag_norder)
+    use omp_lib
     implicit none
     integer, intent(in) :: iflag_norder
 
@@ -45,7 +46,17 @@ contains
     complex(8), allocatable :: gen_der_ex_band(:,:,:,:,:)
     real(8),    allocatable :: shift_vector_ex_band(:,:,:,:,:)
 
-    ! Working arrays for get_ome_inter_ex_sum_k — allocated once outside k-loop
+    ! PATCH: per-thread accumulators/working arrays for the parallel k-loop
+    ! below. Everything that used to be allocated ONCE outside the k-loop
+    ! (and shared/written directly by every call) is now allocated ONCE
+    ! PER THREAD, inside the parallel region, since get_ome_inter_ex_sum_k
+    ! and get_ome_gs_ex_sum_k now write into these thread-private buffers
+    ! rather than module-level globals directly.
+    complex(8), allocatable :: vme_ex_t(:,:), xme_ex_t(:,:)
+    complex(8), allocatable :: vme_ex_k_t(:,:)
+    complex(8), allocatable :: qme_ex_inter1_t(:,:,:), qme_ex_inter2_t(:,:,:)
+    complex(8), allocatable :: yme_ex_inter1_t(:,:,:), yme_ex_inter2_t(:,:,:)
+    complex(8), allocatable :: vme_ex_inter1_t(:,:,:), vme_ex_inter2_t(:,:,:)
     integer,    allocatable :: i_ex_table(:,:)
     complex(8), allocatable :: F_cv(:,:)
     complex(8), allocatable :: FcvH(:,:)
@@ -64,20 +75,16 @@ contains
     complex(8), allocatable :: out_q(:,:)
 
     write(*,*) '6. Entering ome_ex'
-    do_write_exk = (iflag_norder == 1)
-
+    !do_write_exk = (iflag_norder == 1)
+    do_write_exk = .false.
+    
     allocate(ek(npointstotal, nband_ex))
     allocate(vme_ex_band(npointstotal, 3, nband_ex, nband_ex))
 
-    ! PATCH: xme_ex_band is now allocated and zeroed UNCONDITIONALLY, not
-    ! only inside the iflag_norder==2 branch. get_ome_gs_ex_sum_k reads
-    ! xme_ex_band(ibz,nj,iv,nv_ex+ic) on every call regardless of
-    ! iflag_norder, with no guard of its own -- for iflag_norder==1 that
-    ! was previously a read of an UNALLOCATED allocatable array (undefined
-    ! behaviour, most likely a crash). Allocating it here and leaving it
-    ! zeroed for the linear case makes that read well-defined; the value
-    ! it contributes (xme_ex accumulation) is simply never written out or
-    ! otherwise used when iflag_norder==1, so this changes no output.
+    ! xme_ex_band allocated and zeroed UNCONDITIONALLY, not only for
+    ! iflag_norder==2: get_ome_gs_ex_sum_k reads it on every call
+    ! regardless of iflag_norder, with no guard of its own -- for
+    ! iflag_norder==1 an unallocated read here was undefined behaviour.
     allocate(xme_ex_band(npointstotal, 3, nband_ex, nband_ex))
     xme_ex_band = (0.0d0, 0.0d0)
 
@@ -92,8 +99,6 @@ contains
       allocate(berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex))
       allocate(gen_der_ex_band(npointstotal, 3, 3, nband_ex, nband_ex))
       allocate(shift_vector_ex_band(npointstotal, 3, 3, nband_ex, nband_ex))
-      ! PATCH: xme_ex_band allocation moved above -- removed the duplicate
-      ! `allocate(xme_ex_band(...))` that used to live here.
       ek = 0.0d0
       vme_ex_band          = (0.0d0, 0.0d0)
       berry_eigen_ex_band  = (0.0d0, 0.0d0)
@@ -103,7 +108,6 @@ contains
       call read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, &
                                   berry_eigen_ex_band, gen_der_ex_band, &
                                   shift_vector_ex_band, vme_ex_band, ek)
-      ! xme_ex_band already zeroed above; overwritten here with real values.
       call get_ome_sp_xme_ex_band(ek, vme_ex_band, xme_ex_band)
     end if
 
@@ -143,7 +147,51 @@ contains
       call get_fk_ex_der_k()
 
       nbasis = nc_ex * nv_ex
-      allocate(i_ex_table(nc_ex,  nv_ex))
+      ! PATCH: i_ex_table, F_cv, FcvH, D_c, A_c, B_cc, Y_cc, B_vv, Y_vv,
+      ! Uc, Wv, mid_cc, mid_vv, out_v, out_y, out_q are NO LONGER allocated
+      ! here as single shared copies -- they are allocated once per thread
+      ! inside the parallel region below, since get_ome_inter_ex_sum_k is
+      ! now called concurrently by multiple threads on different ibz.
+    end if
+
+    if (iflag_norder == 1) write(*,*) '   Evaluating excitonic OMEs for linear conductivity...'
+    if (iflag_norder == 2) write(*,*) '   Evaluating excitonic OMEs for nonlinear conductivity...'
+
+    ! PATCH: single parallel region wrapping the whole k-point loop,
+    ! instead of get_ome_gs_ex_sum_k / get_ome_gs_ex_kresolved each opening
+    ! (and tearing down) their own !$omp parallel do once per ibz. That
+    ! meant paying thread-team spawn/join overhead npointstotal times for
+    ! a small amount of work each time (norb_ex_cut*nc_ex*nv_ex iterations),
+    ! leaving the CPU under-loaded. Now the team is spawned once; each
+    ! thread processes a dynamically-scheduled subset of k-points from
+    ! start to finish, accumulating into thread-private totals that are
+    ! combined once at the end (same pattern as sigma_second_sp's
+    ! get_sigma_shift_sp). The k-resolved file write is kept in k-order via
+    ! schedule(dynamic) + ordered, same pattern as print_sigma_second_ex.
+    !$omp parallel &
+    !$omp   private(ibz, vme_ex_t, xme_ex_t, vme_ex_k_t, &
+    !$omp           qme_ex_inter1_t, qme_ex_inter2_t, &
+    !$omp           yme_ex_inter1_t, yme_ex_inter2_t, &
+    !$omp           vme_ex_inter1_t, vme_ex_inter2_t, &
+    !$omp           i_ex_table, F_cv, FcvH, D_c, A_c, &
+    !$omp           B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv, &
+    !$omp           out_v, out_y, out_q)
+
+    allocate(vme_ex_t(3, norb_ex_cut)); vme_ex_t = (0.0d0, 0.0d0)
+    allocate(xme_ex_t(3, norb_ex_cut)); xme_ex_t = (0.0d0, 0.0d0)
+    if (do_write_exk) then
+      allocate(vme_ex_k_t(3, norb_ex_cut))
+    end if
+
+    if (iflag_norder == 2) then
+      allocate(qme_ex_inter1_t(3, norb_ex_cut, norb_ex_cut)); qme_ex_inter1_t = (0.0d0,0.0d0)
+      allocate(qme_ex_inter2_t(3, norb_ex_cut, norb_ex_cut)); qme_ex_inter2_t = (0.0d0,0.0d0)
+      allocate(yme_ex_inter1_t(3, norb_ex_cut, norb_ex_cut)); yme_ex_inter1_t = (0.0d0,0.0d0)
+      allocate(yme_ex_inter2_t(3, norb_ex_cut, norb_ex_cut)); yme_ex_inter2_t = (0.0d0,0.0d0)
+      allocate(vme_ex_inter1_t(3, norb_ex_cut, norb_ex_cut)); vme_ex_inter1_t = (0.0d0,0.0d0)
+      allocate(vme_ex_inter2_t(3, norb_ex_cut, norb_ex_cut)); vme_ex_inter2_t = (0.0d0,0.0d0)
+
+      allocate(i_ex_table(nc_ex, nv_ex))
       allocate(F_cv (norb_ex_cut, nbasis))
       allocate(FcvH (nbasis,      norb_ex_cut))
       allocate(D_c  (nbasis,      norb_ex_cut))
@@ -161,28 +209,58 @@ contains
       allocate(out_q(norb_ex_cut, norb_ex_cut))
     end if
 
-    if (iflag_norder == 1) write(*,*) '   Evaluating excitonic OMEs for linear conductivity...'
-    if (iflag_norder == 2) write(*,*) '   Evaluating excitonic OMEs for nonlinear conductivity...'
-
+    !$omp do schedule(dynamic) ordered
     do ibz = 1, npointstotal
       write(*,*) '   OME (ex): k-point', ibz, '/', npointstotal
 
       if (iflag_norder == 1 .or. iflag_norder == 2) &
-        call get_ome_gs_ex_sum_k(ibz, ek, vme_ex_band, xme_ex_band)
+        call get_ome_gs_ex_sum_k(ibz, vme_ex_band, xme_ex_band, vme_ex_t, xme_ex_t)
 
       if (do_write_exk) then
-        call get_ome_gs_ex_kresolved(ibz, ek, vme_ex_band, vme_ex_k)
+        call get_ome_gs_ex_kresolved(ibz, vme_ex_band, vme_ex_k_t)
+        !$omp ordered
         call write_ome_ex_linear_kresolved_point(u_exk, rkxvector(ibz), rkyvector(ibz), &
-                                                  rkzvector(ibz), norb_ex_cut, vme_ex_k)
+                                                  rkzvector(ibz), norb_ex_cut, vme_ex_k_t)
+        !$omp end ordered
       end if
 
       if (iflag_norder == 2) &
         call get_ome_inter_ex_sum_k(                                        &
-               ibz, ek, xme_ex_band, vme_ex_band, berry_eigen_ex_band,     &
+               ibz, xme_ex_band, vme_ex_band, berry_eigen_ex_band,         &
                nbasis, i_ex_table, F_cv, FcvH, D_c, A_c,                   &
                B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv,             &
-               out_v, out_y, out_q)
+               out_v, out_y, out_q,                                        &
+               qme_ex_inter1_t, qme_ex_inter2_t,                          &
+               yme_ex_inter1_t, yme_ex_inter2_t,                          &
+               vme_ex_inter1_t, vme_ex_inter2_t)
     end do
+    !$omp end do
+
+    !$omp critical
+      vme_ex = vme_ex + vme_ex_t
+      xme_ex = xme_ex + xme_ex_t
+      if (iflag_norder == 2) then
+        qme_ex_inter1 = qme_ex_inter1 + qme_ex_inter1_t
+        qme_ex_inter2 = qme_ex_inter2 + qme_ex_inter2_t
+        yme_ex_inter1 = yme_ex_inter1 + yme_ex_inter1_t
+        yme_ex_inter2 = yme_ex_inter2 + yme_ex_inter2_t
+        vme_ex_inter1 = vme_ex_inter1 + vme_ex_inter1_t
+        vme_ex_inter2 = vme_ex_inter2 + vme_ex_inter2_t
+      end if
+    !$omp end critical
+
+    deallocate(vme_ex_t, xme_ex_t)
+    if (do_write_exk) deallocate(vme_ex_k_t)
+    if (iflag_norder == 2) then
+      deallocate(qme_ex_inter1_t, qme_ex_inter2_t)
+      deallocate(yme_ex_inter1_t, yme_ex_inter2_t)
+      deallocate(vme_ex_inter1_t, vme_ex_inter2_t)
+      deallocate(i_ex_table, F_cv, FcvH, D_c, A_c)
+      deallocate(B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv)
+      deallocate(out_v, out_y, out_q)
+    end if
+
+    !$omp end parallel
 
     if (do_write_exk) then
       call write_ome_ex_linear_kresolved_close(u_exk)
@@ -196,9 +274,6 @@ contains
       yme_ex_inter = yme_ex_inter1 + yme_ex_inter2
       xme_ex_inter = yme_ex_inter  + qme_ex_inter
       vme_ex_inter = vme_ex_inter1 + vme_ex_inter2
-      deallocate(i_ex_table, F_cv, FcvH, D_c, A_c)
-      deallocate(B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv)
-      deallocate(out_v, out_y, out_q)
       deallocate(fk_ex_der)
     end if
 
@@ -207,9 +282,6 @@ contains
     write(*,*) '   Optical matrix elements (ex, N->GS) written'
     write(*,*) '   Optical matrix elements (ex, N->N'') not printed in this version'
 
-    ! PATCH: xme_ex_band is now unconditionally allocated above, so it
-    ! must be unconditionally deallocated here too (previously this was
-    ! only deallocated when iflag_norder==2).
     deallocate(ek, vme_ex_band, xme_ex_band)
     if (iflag_norder == 2) &
       deallocate(berry_eigen_ex_band, gen_der_ex_band, shift_vector_ex_band)
@@ -245,51 +317,81 @@ contains
   end subroutine get_ome_sp_xme_ex_band
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  subroutine get_ome_gs_ex_sum_k(ibz, ek, vme_ex_band, xme_ex_band)
+  ! PATCH (both fixes applied here):
+  !  1. i_ex_table(ic,iv) does not depend on nn -- it was previously
+  !     recomputed via get_ex_index_first inside the "do nn" loop, i.e.
+  !     norb_ex_cut times per (ic,iv) for an answer that never changes.
+  !     Now built once per call, before the nn loop.
+  !  2. The internal !$omp parallel do is REMOVED: this subroutine is now
+  !     called from inside the single parallel region opened in
+  !     get_ome_ex, once per ibz, by whichever thread owns that ibz -- an
+  !     inner parallel region here would either be ignored (nesting
+  !     disabled, the common default) or spawn a costly nested team.
+  !     Results are accumulated into vme_ex_t/xme_ex_t (intent(inout)),
+  !     which are thread-private buffers owned by the calling thread,
+  !     rather than into the module-level vme_ex/xme_ex directly -- since
+  !     multiple threads now run this concurrently for different ibz, and
+  !     module-level vme_ex/xme_ex are shared across all of them.
+  subroutine get_ome_gs_ex_sum_k(ibz, vme_ex_band, xme_ex_band, vme_ex_t, xme_ex_t)
     implicit none
-    integer,    intent(in) :: ibz
-    real(8),    intent(in) :: ek(npointstotal, nband_ex)
-    complex(8), intent(in) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
-    complex(8), intent(in) :: xme_ex_band(npointstotal, 3, nband_ex, nband_ex)
-    integer :: nn, ic, iv, i_ex_nn, nj
+    integer,    intent(in)    :: ibz
+    complex(8), intent(in)    :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(in)    :: xme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(inout) :: vme_ex_t(3, norb_ex_cut)
+    complex(8), intent(inout) :: xme_ex_t(3, norb_ex_cut)
+    integer :: nn, ic, iv, nj
+    integer :: i_ex_table(nc_ex, nv_ex)
 
-    !$omp parallel do schedule(static) private(nn, ic, iv, i_ex_nn, nj)
+    do ic = 1, nc_ex
+      do iv = 1, nv_ex
+        call get_ex_index_first(nf, nv_ex, nc_ex, 0, ibz, i_ex_table(ic,iv), ic, iv)
+      end do
+    end do
+
     do nn = 1, norb_ex_cut
       do ic = 1, nc_ex
         do iv = 1, nv_ex
-          call get_ex_index_first(nf, nv_ex, nc_ex, 0, ibz, i_ex_nn, ic, iv)
           do nj = 1, 3
-            vme_ex(nj,nn) = vme_ex(nj,nn) + fk_ex(i_ex_nn,nn)*vme_ex_band(ibz,nj,iv,nv_ex+ic)
-            xme_ex(nj,nn) = xme_ex(nj,nn) + fk_ex(i_ex_nn,nn)*xme_ex_band(ibz,nj,iv,nv_ex+ic)
+            vme_ex_t(nj,nn) = vme_ex_t(nj,nn) + fk_ex(i_ex_table(ic,iv),nn)*vme_ex_band(ibz,nj,iv,nv_ex+ic)
+            xme_ex_t(nj,nn) = xme_ex_t(nj,nn) + fk_ex(i_ex_table(ic,iv),nn)*xme_ex_band(ibz,nj,iv,nv_ex+ic)
           end do
         end do
       end do
     end do
-    !$omp end parallel do
   end subroutine get_ome_gs_ex_sum_k
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  subroutine get_ome_gs_ex_kresolved(ibz, ek, vme_ex_band, vme_ex_k)
+  ! PATCH: same two fixes as get_ome_gs_ex_sum_k -- i_ex_table hoisted out
+  ! of the nn loop, and the internal !$omp parallel do removed since this
+  ! now runs inside the single outer parallel region (one thread, one ibz,
+  ! at a time). vme_ex_k remains a per-call intent(out) result (already
+  ! caller-private in get_ome_ex via vme_ex_k_t), so no accumulator
+  ! restructuring was needed here beyond removing the nested OMP directive.
+  subroutine get_ome_gs_ex_kresolved(ibz, vme_ex_band, vme_ex_k)
     implicit none
     integer,    intent(in)  :: ibz
-    real(8),    intent(in)  :: ek(npointstotal, nband_ex)
     complex(8), intent(in)  :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
     complex(8), intent(out) :: vme_ex_k(3, norb_ex_cut)
-    integer :: nn, ic, iv, i_ex_nn, nj
+    integer :: nn, ic, iv, nj
+    integer :: i_ex_table(nc_ex, nv_ex)
 
     vme_ex_k = (0.0d0, 0.0d0)
-    !$omp parallel do schedule(static) private(nn, ic, iv, i_ex_nn, nj)
+
+    do ic = 1, nc_ex
+      do iv = 1, nv_ex
+        call get_ex_index_first(nf, nv_ex, nc_ex, 0, ibz, i_ex_table(ic,iv), ic, iv)
+      end do
+    end do
+
     do nn = 1, norb_ex_cut
       do ic = 1, nc_ex
         do iv = 1, nv_ex
-          call get_ex_index_first(nf, nv_ex, nc_ex, 0, ibz, i_ex_nn, ic, iv)
           do nj = 1, 3
-            vme_ex_k(nj,nn) = vme_ex_k(nj,nn) + fk_ex(i_ex_nn,nn)*vme_ex_band(ibz,nj,iv,nv_ex+ic)
+            vme_ex_k(nj,nn) = vme_ex_k(nj,nn) + fk_ex(i_ex_table(ic,iv),nn)*vme_ex_band(ibz,nj,iv,nv_ex+ic)
           end do
         end do
       end do
     end do
-    !$omp end parallel do
   end subroutine get_ome_gs_ex_kresolved
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -309,17 +411,30 @@ contains
 ! spurious "cross" terms with iv /= iv' (resp. ic /= ic') that do not belong
 ! in the physical sum. Each iv (resp. ic) therefore requires its own small
 ! ZGEMM contraction, accumulated into the output with beta = 1.
+!
+! PATCH: qme_ex_inter1/2, yme_ex_inter1/2, vme_ex_inter1/2 are now
+! intent(inout) THREAD-PRIVATE accumulators passed in by the caller
+! (get_ome_ex, inside the parallel region) instead of module-level
+! globals written directly. This subroutine is now called concurrently
+! by multiple threads for different ibz; writing straight into the
+! module-level qme_ex_inter1 etc. (as the previous version did) would be
+! a data race the moment more than one thread is active. The working
+! arrays (F_cv, D_c, B_cc, ...) were already intent(inout) dummies here,
+! and are now allocated per-thread by the caller rather than once
+! globally, for the same reason.
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine get_ome_inter_ex_sum_k(                                      &
-               ibz, ek, xme_ex_band, vme_ex_band, berry_eigen_ex_band,   &
+               ibz, xme_ex_band, vme_ex_band, berry_eigen_ex_band,       &
                nbasis, i_ex_table, F_cv, FcvH, D_c, A_c,                 &
                B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv,           &
-               out_v, out_y, out_q)
+               out_v, out_y, out_q,                                      &
+               qme_ex_inter1_t, qme_ex_inter2_t,                        &
+               yme_ex_inter1_t, yme_ex_inter2_t,                        &
+               vme_ex_inter1_t, vme_ex_inter2_t)
     implicit none
 
     integer,    intent(in)    :: ibz
     integer,    intent(in)    :: nbasis
-    real(8),    intent(in)    :: ek(npointstotal, nband_ex)
     complex(8), intent(in)    :: xme_ex_band(npointstotal, 3, nband_ex, nband_ex)
     complex(8), intent(in)    :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
     complex(8), intent(in)    :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
@@ -339,6 +454,12 @@ contains
     complex(8), intent(inout) :: out_v(norb_ex_cut, norb_ex_cut)
     complex(8), intent(inout) :: out_y(norb_ex_cut, norb_ex_cut)
     complex(8), intent(inout) :: out_q(norb_ex_cut, norb_ex_cut)
+    complex(8), intent(inout) :: qme_ex_inter1_t(3, norb_ex_cut, norb_ex_cut)
+    complex(8), intent(inout) :: qme_ex_inter2_t(3, norb_ex_cut, norb_ex_cut)
+    complex(8), intent(inout) :: yme_ex_inter1_t(3, norb_ex_cut, norb_ex_cut)
+    complex(8), intent(inout) :: yme_ex_inter2_t(3, norb_ex_cut, norb_ex_cut)
+    complex(8), intent(inout) :: vme_ex_inter1_t(3, norb_ex_cut, norb_ex_cut)
+    complex(8), intent(inout) :: vme_ex_inter2_t(3, norb_ex_cut, norb_ex_cut)
 
     integer    :: ic, iv, icp, ivp, nj, i_ex, idx, nn
     real(8)    :: berry_shift
@@ -422,8 +543,8 @@ contains
                           mid_cc, nc_ex, &
                     cone, out_y,  norb_ex_cut)
       end do
-      vme_ex_inter1(nj,:,:) = vme_ex_inter1(nj,:,:) + out_v
-      yme_ex_inter1(nj,:,:) = yme_ex_inter1(nj,:,:) + out_y
+      vme_ex_inter1_t(nj,:,:) = vme_ex_inter1_t(nj,:,:) + out_v
+      yme_ex_inter1_t(nj,:,:) = yme_ex_inter1_t(nj,:,:) + out_y
 
       !================================================================
       ! vme_ex_inter2 / yme_ex_inter2:
@@ -470,8 +591,8 @@ contains
                           mid_vv, nv_ex, &
                     cone, out_y,  norb_ex_cut)
       end do
-      vme_ex_inter2(nj,:,:) = vme_ex_inter2(nj,:,:) - out_v
-      yme_ex_inter2(nj,:,:) = yme_ex_inter2(nj,:,:) - out_y
+      vme_ex_inter2_t(nj,:,:) = vme_ex_inter2_t(nj,:,:) - out_v
+      yme_ex_inter2_t(nj,:,:) = yme_ex_inter2_t(nj,:,:) - out_y
 
       !================================================================
       ! qme_ex_inter1 += i * FcvH^T * D_c
@@ -486,7 +607,7 @@ contains
                   ci,    FcvH, nbasis,       &
                          D_c,  nbasis,        &
                   czero, out_q, norb_ex_cut)
-      qme_ex_inter1(nj,:,:) = qme_ex_inter1(nj,:,:) + out_q
+      qme_ex_inter1_t(nj,:,:) = qme_ex_inter1_t(nj,:,:) + out_q
 
       !================================================================
       ! qme_ex_inter2 += i * FcvH^T * A_c,  A_c = -i * fk_ex * berry_shift
@@ -505,7 +626,7 @@ contains
                   ci,    FcvH, nbasis,       &
                          A_c,  nbasis,        &
                   czero, out_q, norb_ex_cut)
-      qme_ex_inter2(nj,:,:) = qme_ex_inter2(nj,:,:) + out_q
+      qme_ex_inter2_t(nj,:,:) = qme_ex_inter2_t(nj,:,:) + out_q
 
     end do ! nj
 

@@ -137,17 +137,17 @@ end subroutine print_exciton_wf
 subroutine get_ex_index_first(nf,nv_ex,nc_ex,iright,ibz,i_ex,ic,iv)
   implicit none
   integer nf,nv_ex,nc_ex,ibz,i_ex,ic,iv
-  integer iright 
+  integer iright
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   !get band indeces (respect the fermi level) from A_cv index
     if (iright.eq.1) then
       iv=(nf-nv_ex)+i_ex-int((i_ex-1)/nv_ex)*nv_ex-nf
-      ic=(nf+1)+int((i_ex-1)/nv_ex)-nf	
+      ic=(nf+1)+int((i_ex-1)/nv_ex)-nf
     end if
-  !get A_cv index from band indeces
+    !get A_cv index from band indeces
     if (iright.ne.1) then
-    i_ex=nc_ex*nv_ex*(ibz-1)+nv_ex*(ic-1)+iv
-    end if	  	  
+      i_ex=nc_ex*nv_ex*(ibz-1)+nv_ex*(ic-1)+iv
+    end if
 end subroutine get_ex_index_first
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

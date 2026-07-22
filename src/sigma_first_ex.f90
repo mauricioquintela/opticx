@@ -111,14 +111,14 @@ module sigma_first_ex
             !at a given frequency
             !delta function
             if (trim(broadening_type_text) == 'gaussian') then
-              delta_n_ex = pi*1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*&
-                exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
+              !delta_n_ex = pi*1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
+              delta_n_ex = 1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
             else if (trim(broadening_type_text) == 'lorentzian') then
-              delta_n_ex = 1.0d0/pi*aimag(1.0d0/(wp(iw)-e_ex(nn)-&
-                complex(0.0d0,eta1)))
+              delta_n_ex = 1.0d0/pi*aimag(1.0d0/(wp(iw)-e_ex(nn)-complex(0.0d0,eta1)))
+                
             else
-              delta_n_ex = pi*1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*&
-                exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
+              !delta_n_ex = pi*1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
+              delta_n_ex = 1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
             end if
             
             !sigma_w
@@ -145,8 +145,11 @@ module sigma_first_ex
     !write frequency dependent conductivity	  
     open(50,file='sigma_first_ex_real_'//trim(material_name)//'.dat')
     open(55,file='sigma_first_ex_imag_'//trim(material_name)//'.dat')
+    
     feps=1.0d0 !use atomic units
+    !$omp parallel do schedule(static) ordered private(iw)
     do iw=1,nw
+      !$omp ordered
       write(50,*) wp(iw)*27.211385d0, &
         realpart(feps*sigma_w_ex(1,1,iw)), &
         realpart(feps*sigma_w_ex(1,2,iw)), &
@@ -168,8 +171,9 @@ module sigma_first_ex
           aimag(feps*sigma_w_ex(3,1,iw)), &
           aimag(feps*sigma_w_ex(3,2,iw)), &
           aimag(feps*sigma_w_ex(3,3,iw))	
-      
+      !$omp end ordered
     end do
+    !$omp end parallel do
 
     close(50)
     close(55)
