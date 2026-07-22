@@ -1,7 +1,7 @@
 module ome_ex
   use constants_math
   use parser_input_file, &
-    only: nf, e1, e2, eta, nw
+    only: nf, e1, e2, eta, nw, iflag_write_exk
   use parser_wannier90_tb, &
     only: material_name, norb
   use parser_optics_xatu_dim, &
@@ -75,8 +75,12 @@ contains
     complex(8), allocatable :: out_q(:,:)
 
     write(*,*) '6. Entering ome_ex'
-    !do_write_exk = (iflag_norder == 1)
-    do_write_exk = .false.
+    ! PATCH: do_write_exk is now driven by the input-file flag
+    ! (Write_ex_kresolved) rather than being hardcoded. Kept ANDed with
+    ! iflag_norder==1 since k-resolved linear output only makes sense when
+    ! computing the linear-order matrix elements in the first place --
+    ! toggling the flag on for iflag_norder==2 has no effect, by design.
+    do_write_exk = iflag_write_exk .and. (iflag_norder == 1)
     
     allocate(ek(npointstotal, nband_ex))
     allocate(vme_ex_band(npointstotal, 3, nband_ex, nband_ex))

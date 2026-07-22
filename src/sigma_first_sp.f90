@@ -138,6 +138,78 @@ module sigma_first_sp
   end subroutine print_sigma_first_sp
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!   subroutine get_kubo_intens_sp(nband_ex,npointstotal,vcell,e,vme,nw,wp,eta1,sigma_w_sp)
+!     implicit none
+!     integer,    intent(in)    :: nw, nband_ex, npointstotal
+!     integer                   :: iw, nn, nnp, nj, njp
+!     real(8),    intent(in)    :: e(nband_ex), wp(nw), eta1, vcell
+!     complex(8), intent(in)    :: vme(3,nband_ex,nband_ex)
+!     complex(8), intent(inout) :: sigma_w_sp(3,3,nw)
+! 
+!     real(8)    :: fnn, fnnp, factor1
+!     real(8)    :: delta_nnp
+!     complex(8) :: vme_prod
+!     complex(8) :: sigma_local(3,3,nw)
+! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! 
+!     sigma_local = (0.0d0, 0.0d0)
+! 
+!     do nn=1,nband_ex
+!       !fermi distribution
+!       if (nn.le.nv_ex) then
+!         fnn=1.0d0
+!       else
+!         fnn=0.0d0
+!       end if
+! 
+!       do nnp=1,nband_ex
+!         !fermi distribution
+!         if (nnp.le.nv_ex) then
+!           fnnp=1.0d0
+!         else
+!           fnnp=0.0d0
+!         end if
+! 
+!         ! added check for degeneracy points in energy to prevent division by zero in the denominators
+!         if (abs(fnn-fnnp).lt.0.1d0 .or. abs(e(nn)-e(nnp)).lt.1.0d-6) then
+!           factor1=0.0d0
+!         else
+!           factor1=(fnn-fnnp)/(e(nn)-e(nnp))
+!         end if
+! 
+!         ! Skip entirely if no contribution
+!         if (factor1 == 0.0d0) cycle
+! 
+!         do iw=1,nw
+!           if (trim(broadening_type_text) == 'gaussian') then
+!             delta_nnp = -1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*&
+!               exp(-0.5d0/(eta1**2)*(wp(iw)-e(nn)+e(nnp))**2)
+!           else if (trim(broadening_type_text) == 'lorentzian') then
+!             delta_nnp = 1.0d0/pi*aimag(1.0d0/(-wp(iw)+e(nn)-e(nnp)+&
+!               complex(0.0d0,eta1)))
+!           else
+!             delta_nnp = -1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*&
+!               exp(-0.5d0/(eta1**2)*(wp(iw)-e(nn)+e(nnp))**2)
+!           end if
+! 
+!           do nj=1,3
+!             do njp=1,3
+!               vme_prod = vme(nj,nn,nnp)*vme(njp,nnp,nn)
+!               sigma_local(nj,njp,iw) = sigma_local(nj,njp,iw) + &
+!                 pi/(dble(npointstotal)*vcell)*factor1*vme_prod*delta_nnp
+!             end do
+!           end do
+! 
+!         end do ! iw
+!       end do   ! nnp
+!     end do     ! nn
+! 
+!     ! Accumulate into the caller's array (protected by the outer
+!     ! k-point REDUCTION in get_sigma_first_sp)
+!     sigma_w_sp = sigma_w_sp + sigma_local
+! 
+!   end subroutine get_kubo_intens_sp
+  
   subroutine get_kubo_intens_sp(nband_ex,npointstotal,vcell,e,vme,nw,wp,eta1,sigma_w_sp)
     implicit none
     integer,    intent(in)    :: nw, nband_ex, npointstotal
@@ -148,37 +220,33 @@ module sigma_first_sp
 
     real(8)    :: fnn, fnnp, factor1
     real(8)    :: delta_nnp
-    complex(8) :: vme_prod
+    complex(8) :: vme_prod(3,3)   ! PATCH: precomputed once per (nn,nnp), not per iw
     complex(8) :: sigma_local(3,3,nw)
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     sigma_local = (0.0d0, 0.0d0)
 
     do nn=1,nband_ex
-      !fermi distribution
-      if (nn.le.nv_ex) then
-        fnn=1.0d0
-      else
-        fnn=0.0d0
-      end if
+      if (nn.le.nv_ex) then; fnn=1.0d0; else; fnn=0.0d0; end if
 
       do nnp=1,nband_ex
-        !fermi distribution
-        if (nnp.le.nv_ex) then
-          fnnp=1.0d0
-        else
-          fnnp=0.0d0
-        end if
+        if (nnp.le.nv_ex) then; fnnp=1.0d0; else; fnnp=0.0d0; end if
 
-        ! added check for degeneracy points in energy to prevent division by zero in the denominators
         if (abs(fnn-fnnp).lt.0.1d0 .or. abs(e(nn)-e(nnp)).lt.1.0d-6) then
           factor1=0.0d0
         else
           factor1=(fnn-fnnp)/(e(nn)-e(nnp))
         end if
 
-        ! Skip entirely if no contribution
         if (factor1 == 0.0d0) cycle
+
+        ! PATCH: vme_prod(nj,njp) does not depend on iw -- computed once
+        ! here instead of nw times inside the frequency loop below.
+        do nj=1,3
+          do njp=1,3
+            vme_prod(nj,njp) = pi/(dble(npointstotal)*vcell)*factor1 &
+                                * vme(nj,nn,nnp)*vme(njp,nnp,nn)
+          end do
+        end do
 
         do iw=1,nw
           if (trim(broadening_type_text) == 'gaussian') then
@@ -194,19 +262,13 @@ module sigma_first_sp
 
           do nj=1,3
             do njp=1,3
-              vme_prod = vme(nj,nn,nnp)*vme(njp,nnp,nn)
-              sigma_local(nj,njp,iw) = sigma_local(nj,njp,iw) + &
-                pi/(dble(npointstotal)*vcell)*factor1*vme_prod*delta_nnp
+              sigma_local(nj,njp,iw) = sigma_local(nj,njp,iw) + vme_prod(nj,njp)*delta_nnp
             end do
           end do
-
         end do ! iw
       end do   ! nnp
     end do     ! nn
 
-    ! Accumulate into the caller's array (protected by the outer
-    ! k-point REDUCTION in get_sigma_first_sp)
     sigma_w_sp = sigma_w_sp + sigma_local
-
   end subroutine get_kubo_intens_sp
 end module sigma_first_sp

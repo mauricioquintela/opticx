@@ -97,7 +97,8 @@ module sigma_first_ex
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	  
     skubo_ex_int=0.0d0
     sigma_w_ex=0.0d0
-     
+    !$omp parallel do schedule(static) private(nn,nj,njp,iw,skubo_ex_int,delta_n_ex) &
+    !$omp   reduction(+:sigma_w_ex)
     do nn=1,norb_ex_cut
       do nj=1,3
         do njp=1,3
@@ -128,6 +129,7 @@ module sigma_first_ex
         end do
       end do
     end do  
+    !$omp end parallel do
 
   end subroutine get_kubo_intens_ex
 

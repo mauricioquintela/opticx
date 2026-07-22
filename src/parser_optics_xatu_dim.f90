@@ -187,7 +187,7 @@ subroutine get_exciton_dim()
     end if
   end do
   128   continue
-  close(10)	 
+  close(10)
 
   !save number of conduction bands
   open(10,file=file2open)

@@ -18,7 +18,8 @@ module parser_input_file
   public :: nband_index
   public :: norb_ex_cut
   public :: broadening_type_text
-  !public :: do_write_exk
+  public :: iflag_write_exk_text
+  public :: iflag_write_exk
   public :: read_line_numbers_int !subroutine
 
   character(len=1000) :: material_name_in
@@ -27,7 +28,7 @@ module parser_input_file
   character(len=100) :: iflag_ome_sp_text
   character(len=100) :: iflag_ome_ex_text
   character(len=100) :: broadening_type_text
-  !character(len=100) :: do_write_exk
+  character(len=100) :: iflag_write_exk_text
   character(len=1000) :: xatu_eigval_filepath_in
   character(len=1000) :: xatu_states_filepath_in
   character(len=100) :: response_text
@@ -35,6 +36,7 @@ module parser_input_file
   logical :: iflag_xatu
   logical :: iflag_ome_sp
   logical :: iflag_ome_ex
+  logical :: iflag_write_exk
 
   integer :: ndim
   integer :: nf
@@ -72,6 +74,7 @@ module parser_input_file
       logical :: ndim_found, material_found, xatu_found, bandlist_found
       logical :: ncells_found, nfermi_found, ome_sp_found, ome_ex_found
       logical :: response_found, energy_found, exciton_found
+      logical :: write_exk_found   ! PATCH: was declared-but-unused in a comment
       
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       write(*,*) '1. Entering parser_input_file'
@@ -89,9 +92,10 @@ module parser_input_file
       response_found = .false.
       energy_found = .false.
       exciton_found = .false.
-      !write_exk_found = .false.
+      write_exk_found = .false.
       ! default broadening
       broadening_type_text = 'gaussian'
+      iflag_write_exk_text = 'false'
       
       call get_command_argument(1,filename_input)
       open(10,file=adjustl(filename_input))
@@ -160,9 +164,9 @@ module parser_input_file
             read(10,*) response_text
             response_found = .true.
             
-!           else if (index(param_name, 'Write_ex_kresolved') > 0) then
-!             read(10,*) write_exk_text
-!             write_exk_found = .true.
+          else if (index(param_name, 'Write_ex_kresolved') > 0) then
+            read(10,*) iflag_write_exk_text
+            write_exk_found = .true.
             
           else if (index(param_name, 'Energy_variables') > 0) then
             read(10,*) e1, e2, eta, nw
@@ -201,6 +205,13 @@ module parser_input_file
       else
         iflag_ome_ex = .false.
       end if
+      
+      if (iflag_write_exk_text == 'true') then
+        iflag_write_exk = .true.
+      else
+        iflag_write_exk = .false.
+      end if
+
       
       write(*,*) '   Input file has been read'
     end subroutine get_input_file
