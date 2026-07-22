@@ -42,20 +42,126 @@ contains
       active_flags_set = .true.
    end subroutine set_active_flags
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-   subroutine get_ome_sp(iflag_norder)
+!    subroutine get_ome_sp(iflag_norder)
+!       implicit none
+! 
+!       integer iflag_norder
+!       integer ibz
+!       integer i,j,ii,jj,nj
+! 
+!       ! PATCH: these were `allocatable` + pre-loop `allocate`, then marked
+!       ! OMP PRIVATE. Per the OpenMP/Fortran spec that gives each thread an
+!       ! UNALLOCATED private copy at the start of the parallel region (the
+!       ! pre-loop allocate does not carry over) -> undefined behavior on any
+!       ! read/write inside the loop. Switching to automatic (non-allocatable)
+!       ! arrays sized by norb fixes this: each thread gets a correctly-sized
+!       ! private instance automatically, with no allocate/deallocate needed.
+!       complex*16 :: skernel(norb,norb), hkernel(norb,norb)
+!       complex*16 :: sderkernel(3,norb,norb), hderkernel(3,norb,norb)
+!       complex*16 :: akernel(3,norb,norb)
+! 
+!       real(8)    :: e(norb)
+!       complex*16 :: hk_ev(norb,norb)
+!       complex*16 :: vme(3,norb,norb)
+! 
+!       complex*16 :: abc(3,norb,norb)
+!       complex*16 :: gd1(3,3,norb,norb), gd2(3,3,norb,norb), gd3(3,3,norb,norb)
+!       complex*16 :: gen_der(3,3,norb,norb)
+!       complex*16 :: vme_der(3,3,norb,norb)
+!       real(8)    :: shift_vector(3,3,norb,norb)
+!       complex*16 :: berry_eigen1(3,norb,norb), berry_eigen2(3,norb,norb)
+!       complex*16 :: berry_eigen(3,norb,norb)
+! 
+!       real(8) :: rkx,rky,rkz
+!       ! PATCH: removed unused `ecomplex`, `naux1`, `ibz_sum` (declared/
+!       ! allocated in the original but never read or incremented).
+!       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!       write(*,*) '5. Entering ome_sp'
+! 
+!       allocate(vme_ex_band(npointstotal,3,nband_ex,nband_ex))
+!       allocate(ek(npointstotal,nband_ex))
+!       allocate(berry_eigen_ex_band(npointstotal,3,nband_ex,nband_ex))
+!       allocate(gen_der_ex_band(npointstotal,3,3,nband_ex,nband_ex))
+!       allocate(shift_vector_ex_band(npointstotal,3,3,nband_ex,nband_ex))
+!       gen_der_ex_band=0.0d0
+!       shift_vector_ex_band=0.0d0
+!       berry_eigen_ex_band=0.0d0
+!       vme_ex_band=0.0d0
+!       ek=0.0d0
+! 
+!       ! PATCH: compute lattice-dimensionality flags exactly once, up front,
+!       ! instead of inside the hot k-point loop.
+!       call set_active_flags()
+! 
+!       write(*,*) '   Calculating optical matrix elements (sp): sampling BZ...'
+! 
+!       !$OMP PARALLEL DO PRIVATE(rkx,rky,rkz), &
+!       !$OMP PRIVATE(hkernel,skernel,sderkernel,hderkernel,akernel), &
+!       !$OMP PRIVATE(hk_ev,e,vme), &
+!       !$OMP PRIVATE(abc,gen_der,gd1,gd2,gd3), &
+!       !$OMP PRIVATE(vme_der,shift_vector,berry_eigen1,berry_eigen2,berry_eigen)
+!       do ibz=1,npointstotal
+!          write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
+!          rkx=rkxvector(ibz)
+!          rky=rkyvector(ibz)
+!          rkz=rkzvector(ibz)
+! !          write(*,*) '   kx ky kz: ',rkx,',',rky,',',rkz
+!          
+!          call get_vme_kernels_ome(rkx,rky,rkz,norb,skernel,sderkernel, &
+!             hkernel,hderkernel,akernel)
+!          call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+!             hk_ev,e,vme)
+! 
+!          if (iflag_norder.eq.2) then
+!             call get_gen_der_sumrule(norb,vme,e,abc,gen_der,gd1,gd2,gd3)
+!             call get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
+!                shift_vector,berry_eigen1,berry_eigen2,berry_eigen)
+!          end if
+! 
+!          do i=1,nband_ex
+!             ii=nband_index(i)
+!             ek(ibz,i)=e(ii)
+!             do nj=1,3
+!                do j=1,nband_ex
+!                   jj=nband_index(j)
+!                   vme_ex_band(ibz,nj,i,j)=vme(nj,ii,jj)
+! 
+!                   if (iflag_norder.eq.2) then
+!                      shift_vector_ex_band(ibz,nj,1,i,j)=shift_vector(nj,1,ii,jj)
+!                      shift_vector_ex_band(ibz,nj,2,i,j)=shift_vector(nj,2,ii,jj)
+!                      shift_vector_ex_band(ibz,nj,3,i,j)=shift_vector(nj,3,ii,jj)
+! 
+!                      gen_der_ex_band(ibz,nj,1,i,j)=gen_der(nj,1,ii,jj)
+!                      gen_der_ex_band(ibz,nj,2,i,j)=gen_der(nj,2,ii,jj)
+!                      gen_der_ex_band(ibz,nj,3,i,j)=gen_der(nj,3,ii,jj)
+! 
+!                      berry_eigen_ex_band(ibz,nj,i,j)=berry_eigen(nj,ii,jj)
+!                   end if
+!                end do
+!             end do
+!          end do
+!       end do
+!       !$OMP END PARALLEL DO
+! 
+!       write(*,*) '   Writing optical matrix elements (sp) into file'
+!       if (iflag_norder.eq.1) then
+!          call write_ome_sp_linear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek)
+!       end if
+!       if (iflag_norder.eq.2) then
+!          call write_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek, &
+!             gen_der_ex_band,shift_vector_ex_band,berry_eigen_ex_band)
+!       end if
+!       write(*,*) '   Optical matrix elements (sp) have been written in file'
+!    end subroutine get_ome_sp
+
+      subroutine get_ome_sp(iflag_norder)
       implicit none
 
       integer iflag_norder
       integer ibz
       integer i,j,ii,jj,nj
 
-      ! PATCH: these were `allocatable` + pre-loop `allocate`, then marked
-      ! OMP PRIVATE. Per the OpenMP/Fortran spec that gives each thread an
-      ! UNALLOCATED private copy at the start of the parallel region (the
-      ! pre-loop allocate does not carry over) -> undefined behavior on any
-      ! read/write inside the loop. Switching to automatic (non-allocatable)
-      ! arrays sized by norb fixes this: each thread gets a correctly-sized
-      ! private instance automatically, with no allocate/deallocate needed.
+      ! Small per-thread temporaries: fine as automatic (stack) arrays.
       complex*16 :: skernel(norb,norb), hkernel(norb,norb)
       complex*16 :: sderkernel(3,norb,norb), hderkernel(3,norb,norb)
       complex*16 :: akernel(3,norb,norb)
@@ -65,16 +171,26 @@ contains
       complex*16 :: vme(3,norb,norb)
 
       complex*16 :: abc(3,norb,norb)
-      complex*16 :: gd1(3,3,norb,norb), gd2(3,3,norb,norb), gd3(3,3,norb,norb)
-      complex*16 :: gen_der(3,3,norb,norb)
-      complex*16 :: vme_der(3,3,norb,norb)
       real(8)    :: shift_vector(3,3,norb,norb)
       complex*16 :: berry_eigen1(3,norb,norb), berry_eigen2(3,norb,norb)
       complex*16 :: berry_eigen(3,norb,norb)
 
+      ! PATCH: these were automatic (3,3,norb,norb) stack arrays -- the
+      ! dominant contributors to per-thread stack usage (~5.5 MB combined
+      ! at norb=88, times every OMP thread). Now allocatable + explicitly
+      ! allocated once per thread on entry to the parallel region and
+      ! freed once on exit, instead of living on the stack.
+      complex*16, allocatable :: gd1(:,:,:,:), gd2(:,:,:,:), gd3(:,:,:,:)
+      complex*16, allocatable :: gen_der(:,:,:,:), vme_der(:,:,:,:)
+
+      ! PATCH: previously automatic locals *inside* get_berry_eigen_fourpoint
+      ! (hk_ev_neigh, vme_neigh) -- the single largest offender there
+      ! (~2.6 MB + ~0.9 MB per call). Now allocated once per thread here
+      ! and passed down as arguments instead of being re-declared as
+      ! automatic arrays on every call into that subroutine.
+      complex*16, allocatable :: hk_ev_neigh(:,:,:), vme_neigh(:,:,:,:)
+
       real(8) :: rkx,rky,rkz
-      ! PATCH: removed unused `ecomplex`, `naux1`, `ibz_sum` (declared/
-      ! allocated in the original but never read or incremented).
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       write(*,*) '5. Entering ome_sp'
 
@@ -89,17 +205,26 @@ contains
       vme_ex_band=0.0d0
       ek=0.0d0
 
-      ! PATCH: compute lattice-dimensionality flags exactly once, up front,
-      ! instead of inside the hot k-point loop.
       call set_active_flags()
 
       write(*,*) '   Calculating optical matrix elements (sp): sampling BZ...'
 
-      !$OMP PARALLEL DO PRIVATE(rkx,rky,rkz), &
+      ! PATCH: PARALLEL and DO split apart (was a combined PARALLEL DO) so
+      ! each thread can run an ALLOCATE once on entry and a DEALLOCATE once
+      ! on exit, bracketing the DO, rather than these living inside the
+      ! per-iteration call stack.
+      !$OMP PARALLEL PRIVATE(rkx,rky,rkz,ibz,i,j,ii,jj,nj), &
       !$OMP PRIVATE(hkernel,skernel,sderkernel,hderkernel,akernel), &
       !$OMP PRIVATE(hk_ev,e,vme), &
       !$OMP PRIVATE(abc,gen_der,gd1,gd2,gd3), &
-      !$OMP PRIVATE(vme_der,shift_vector,berry_eigen1,berry_eigen2,berry_eigen)
+      !$OMP PRIVATE(vme_der,shift_vector,berry_eigen1,berry_eigen2,berry_eigen), &
+      !$OMP PRIVATE(hk_ev_neigh,vme_neigh)
+
+      allocate(gd1(3,3,norb,norb), gd2(3,3,norb,norb), gd3(3,3,norb,norb))
+      allocate(gen_der(3,3,norb,norb), vme_der(3,3,norb,norb))
+      allocate(hk_ev_neigh(7,norb,norb), vme_neigh(7,3,norb,norb))
+
+      !$OMP DO
       do ibz=1,npointstotal
          write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
          rkx=rkxvector(ibz)
@@ -114,7 +239,8 @@ contains
          if (iflag_norder.eq.2) then
             call get_gen_der_sumrule(norb,vme,e,abc,gen_der,gd1,gd2,gd3)
             call get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
-               shift_vector,berry_eigen1,berry_eigen2,berry_eigen)
+               shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
+               hk_ev_neigh,vme_neigh)
          end if
 
          do i=1,nband_ex
@@ -140,7 +266,10 @@ contains
             end do
          end do
       end do
-      !$OMP END PARALLEL DO
+      !$OMP END DO
+
+      deallocate(gd1,gd2,gd3,gen_der,vme_der,hk_ev_neigh,vme_neigh)
+      !$OMP END PARALLEL
 
       write(*,*) '   Writing optical matrix elements (sp) into file'
       if (iflag_norder.eq.1) then
@@ -152,14 +281,55 @@ contains
       end if
       write(*,*) '   Optical matrix elements (sp) have been written in file'
    end subroutine get_ome_sp
+
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-   subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
-      shift_vector,berry_eigen1,berry_eigen2,berry_eigen)
+!    subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
+!       shift_vector,berry_eigen1,berry_eigen2,berry_eigen)
+!       implicit none
+! 
+!       ! PATCH: removed local `integer nR,norb` shadowing the module-level
+!       ! `nR` from parser_wannier90_tb. Only `norb` is actually a dummy
+!       ! argument here; `nR` was an unused, silently-shadowing landmine.
+!       integer norb
+!       integer nn,nnp
+!       integer ialpha,ialphap
+!       integer nj,njp
+! 
+!       dimension hkernel(norb,norb),skernel(norb,norb)
+!       dimension sderkernel(3,norb,norb),hderkernel(3,norb,norb)
+! 
+!       ! PATCH: removed unused `hk_alpha`.
+!       dimension hk_ev(norb,norb),e(norb)
+!       dimension akernel(3,norb,norb)
+! 
+!       dimension vjseudoa(3,norb,norb),vjseudob(3,norb,norb),vme(3,norb,norb)
+!       dimension berry_eigen1(3,norb,norb),berry_eigen2(3,norb,norb)
+!       dimension berry_eigen(3,norb,norb)
+!       dimension vme_der(3,3,norb,norb)
+!       dimension vme_der_phase(3,3,norb,norb)
+!       ! 7 neighbour slots: 1/3 = x-,x+ ; 2/4 = y-,y+ ; 5/6 = z-,z+ ; 7 = central
+!       dimension hk_ev_neigh(7,norb,norb)
+!       dimension vme_neigh(7,3,norb,norb)
+! 
+!       dimension shift_vector(3,3,norb,norb)
+! 
+!       real*8 rkx,rky,rkz,rkx_neigh,rky_neigh,rkz_neigh
+!       real*8 e
+!       real*8 vme_der_phase
+!       real*8 shift_vector
+!       real*8 ph1,ph2,ph3,ph4,ph5,ph6
+! 
+!       complex*16 hkernel,akernel,skernel,sderkernel,hderkernel
+!       complex*16 hk_ev,vjseudoa,vjseudob,vme
+!       complex*16 aux1,aux2,aux3,aux4,aux5,aux6
+!       complex*16 vme_der
+!       complex*16 berry_eigen1,berry_eigen2,berry_eigen
+!       complex*16 hk_ev_neigh,vme_neigh
+      subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
+      shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
+      hk_ev_neigh,vme_neigh)
       implicit none
 
-      ! PATCH: removed local `integer nR,norb` shadowing the module-level
-      ! `nR` from parser_wannier90_tb. Only `norb` is actually a dummy
-      ! argument here; `nR` was an unused, silently-shadowing landmine.
       integer norb
       integer nn,nnp
       integer ialpha,ialphap
@@ -168,7 +338,6 @@ contains
       dimension hkernel(norb,norb),skernel(norb,norb)
       dimension sderkernel(3,norb,norb),hderkernel(3,norb,norb)
 
-      ! PATCH: removed unused `hk_alpha`.
       dimension hk_ev(norb,norb),e(norb)
       dimension akernel(3,norb,norb)
 
@@ -177,9 +346,13 @@ contains
       dimension berry_eigen(3,norb,norb)
       dimension vme_der(3,3,norb,norb)
       dimension vme_der_phase(3,3,norb,norb)
-      ! 7 neighbour slots: 1/3 = x-,x+ ; 2/4 = y-,y+ ; 5/6 = z-,z+ ; 7 = central
-      dimension hk_ev_neigh(7,norb,norb)
-      dimension vme_neigh(7,3,norb,norb)
+
+      ! PATCH: hk_ev_neigh, vme_neigh are now dummy arguments (allocated
+      ! once per OMP thread by the caller, get_ome_sp) instead of local
+      ! automatic arrays re-created on the stack every call. This was the
+      ! single largest stack consumer in this routine (~3.5 MB at norb=88).
+      complex*16 :: hk_ev_neigh(7,norb,norb)
+      complex*16 :: vme_neigh(7,3,norb,norb)
 
       dimension shift_vector(3,3,norb,norb)
 
@@ -194,7 +367,6 @@ contains
       complex*16 aux1,aux2,aux3,aux4,aux5,aux6
       complex*16 vme_der
       complex*16 berry_eigen1,berry_eigen2,berry_eigen
-      complex*16 hk_ev_neigh,vme_neigh
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       ! PATCH: active_x/y/z are now module-level, computed once in
       ! set_active_flags() -- no longer recomputed here on every one of the

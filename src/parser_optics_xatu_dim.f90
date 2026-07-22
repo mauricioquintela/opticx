@@ -94,7 +94,7 @@ subroutine get_optics_xatu_dim()
   
 !   write(*,*) rkxvector(1),rkyvector(1),rkzvector(1)
 !   write(*,*) rkxvector(2),rkyvector(2),rkzvector(2)
-!   write(*,*) rkxvector(2),rkyvector(2),rkzvector(3)
+!   write(*,*) rkxvector(3),rkyvector(3),rkzvector(3)
 !   write(*,*) G(1,1),G(1,2),G(1,3)
 !   write(*,*) G(2,1),G(2,2),G(2,3)
 !   write(*,*) G(3,1),G(3,2),G(3,3)
