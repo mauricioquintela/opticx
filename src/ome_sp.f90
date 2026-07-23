@@ -154,7 +154,7 @@ contains
 !       write(*,*) '   Optical matrix elements (sp) have been written in file'
 !    end subroutine get_ome_sp
 
-      subroutine get_ome_sp(iflag_norder)
+subroutine get_ome_sp(iflag_norder)
       implicit none
 
       integer iflag_norder
@@ -175,20 +175,16 @@ contains
       complex*16 :: berry_eigen1(3,norb,norb), berry_eigen2(3,norb,norb)
       complex*16 :: berry_eigen(3,norb,norb)
 
-      ! PATCH: these were automatic (3,3,norb,norb) stack arrays -- the
-      ! dominant contributors to per-thread stack usage (~5.5 MB combined
-      ! at norb=88, times every OMP thread). Now allocatable + explicitly
-      ! allocated once per thread on entry to the parallel region and
-      ! freed once on exit, instead of living on the stack.
+      ! Previously allocatable, already moved off the stack in an earlier pass.
       complex*16, allocatable :: gd1(:,:,:,:), gd2(:,:,:,:), gd3(:,:,:,:)
       complex*16, allocatable :: gen_der(:,:,:,:), vme_der(:,:,:,:)
-
-      ! PATCH: previously automatic locals *inside* get_berry_eigen_fourpoint
-      ! (hk_ev_neigh, vme_neigh) -- the single largest offender there
-      ! (~2.6 MB + ~0.9 MB per call). Now allocated once per thread here
-      ! and passed down as arguments instead of being re-declared as
-      ! automatic arrays on every call into that subroutine.
       complex*16, allocatable :: hk_ev_neigh(:,:,:), vme_neigh(:,:,:,:)
+
+      ! PATCH: vme_der_phase was a (3,3,norb,norb) automatic local INSIDE
+      ! get_berry_eigen_fourpoint (~557 KB at norb=88, real*8). Moved here,
+      ! allocated once per thread, and passed down as a dummy argument --
+      ! same treatment already given to hk_ev_neigh/vme_neigh.
+      real(8), allocatable :: vme_der_phase(:,:,:,:)
 
       real(8) :: rkx,rky,rkz
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -209,78 +205,91 @@ contains
 
       write(*,*) '   Calculating optical matrix elements (sp): sampling BZ...'
 
-      ! PATCH: PARALLEL and DO split apart (was a combined PARALLEL DO) so
-      ! each thread can run an ALLOCATE once on entry and a DEALLOCATE once
-      ! on exit, bracketing the DO, rather than these living inside the
-      ! per-iteration call stack.
       !$OMP PARALLEL PRIVATE(rkx,rky,rkz,ibz,i,j,ii,jj,nj), &
       !$OMP PRIVATE(hkernel,skernel,sderkernel,hderkernel,akernel), &
       !$OMP PRIVATE(hk_ev,e,vme), &
       !$OMP PRIVATE(abc,gen_der,gd1,gd2,gd3), &
       !$OMP PRIVATE(vme_der,shift_vector,berry_eigen1,berry_eigen2,berry_eigen), &
-      !$OMP PRIVATE(hk_ev_neigh,vme_neigh)
+      !$OMP PRIVATE(hk_ev_neigh,vme_neigh,vme_der_phase)
 
       allocate(gd1(3,3,norb,norb), gd2(3,3,norb,norb), gd3(3,3,norb,norb))
       allocate(gen_der(3,3,norb,norb), vme_der(3,3,norb,norb))
       allocate(hk_ev_neigh(7,norb,norb), vme_neigh(7,3,norb,norb))
+      ! PATCH: allocated once per thread here instead of once per call inside
+      ! get_berry_eigen_fourpoint.
+      allocate(vme_der_phase(3,3,norb,norb))
 
       !$OMP DO
       do ibz=1,npointstotal
-         write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
-         rkx=rkxvector(ibz)
-         rky=rkyvector(ibz)
-         rkz=rkzvector(ibz)
+      write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
+      rkx=rkxvector(ibz)
+      rky=rkyvector(ibz)
+      rkz=rkzvector(ibz)
 
-         call get_vme_kernels_ome(rkx,rky,rkz,norb,skernel,sderkernel, &
+      call get_vme_kernels_ome(rkx,rky,rkz,norb,skernel,sderkernel, &
             hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev,e,vme)
 
-         if (iflag_norder.eq.2) then
+      if (iflag_norder.eq.2) then
             call get_gen_der_sumrule(norb,vme,e,abc,gen_der,gd1,gd2,gd3)
+            ! PATCH: skernel, hkernel, sderkernel, hderkernel, akernel, and
+            ! vme_der_phase are now passed in as scratch buffers owned by this
+            ! (calling) frame, instead of get_berry_eigen_fourpoint declaring
+            ! its own second full-size copies of each on its own stack frame.
+            ! This is safe: the caller's skernel/hkernel/etc. values from the
+            ! CENTRAL k-point (used just above) are legitimately overwritten by
+            ! the neighbor-point evaluations inside get_berry_eigen_fourpoint,
+            ! but nothing after this call in get_ome_sp reads them again before
+            ! the next iteration re-fills them via get_vme_kernels_ome. e and
+            ! vme (central-point eigenvalues/matrix elements) ARE read again
+            ! just below (ek(ibz,i)=e(ii), vme_ex_band(...)=vme(...)), so those
+            ! two are NOT passed down -- get_berry_eigen_fourpoint keeps its
+            ! own small local scratch for the neighbor eigenvalues it discards.
             call get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
-               shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
-               hk_ev_neigh,vme_neigh)
-         end if
+            shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
+            hk_ev_neigh,vme_neigh, &
+            skernel,hkernel,sderkernel,hderkernel,akernel,vme_der_phase)
+      end if
 
-         do i=1,nband_ex
+      do i=1,nband_ex
             ii=nband_index(i)
             ek(ibz,i)=e(ii)
             do nj=1,3
-               do j=1,nband_ex
+            do j=1,nband_ex
                   jj=nband_index(j)
                   vme_ex_band(ibz,nj,i,j)=vme(nj,ii,jj)
 
                   if (iflag_norder.eq.2) then
-                     shift_vector_ex_band(ibz,nj,1,i,j)=shift_vector(nj,1,ii,jj)
-                     shift_vector_ex_band(ibz,nj,2,i,j)=shift_vector(nj,2,ii,jj)
-                     shift_vector_ex_band(ibz,nj,3,i,j)=shift_vector(nj,3,ii,jj)
+                  shift_vector_ex_band(ibz,nj,1,i,j)=shift_vector(nj,1,ii,jj)
+                  shift_vector_ex_band(ibz,nj,2,i,j)=shift_vector(nj,2,ii,jj)
+                  shift_vector_ex_band(ibz,nj,3,i,j)=shift_vector(nj,3,ii,jj)
 
-                     gen_der_ex_band(ibz,nj,1,i,j)=gen_der(nj,1,ii,jj)
-                     gen_der_ex_band(ibz,nj,2,i,j)=gen_der(nj,2,ii,jj)
-                     gen_der_ex_band(ibz,nj,3,i,j)=gen_der(nj,3,ii,jj)
+                  gen_der_ex_band(ibz,nj,1,i,j)=gen_der(nj,1,ii,jj)
+                  gen_der_ex_band(ibz,nj,2,i,j)=gen_der(nj,2,ii,jj)
+                  gen_der_ex_band(ibz,nj,3,i,j)=gen_der(nj,3,ii,jj)
 
-                     berry_eigen_ex_band(ibz,nj,i,j)=berry_eigen(nj,ii,jj)
+                  berry_eigen_ex_band(ibz,nj,i,j)=berry_eigen(nj,ii,jj)
                   end if
-               end do
             end do
-         end do
+            end do
+      end do
       end do
       !$OMP END DO
 
-      deallocate(gd1,gd2,gd3,gen_der,vme_der,hk_ev_neigh,vme_neigh)
+      deallocate(gd1,gd2,gd3,gen_der,vme_der,hk_ev_neigh,vme_neigh,vme_der_phase)
       !$OMP END PARALLEL
 
       write(*,*) '   Writing optical matrix elements (sp) into file'
       if (iflag_norder.eq.1) then
-         call write_ome_sp_linear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek)
+      call write_ome_sp_linear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek)
       end if
       if (iflag_norder.eq.2) then
-         call write_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek, &
+      call write_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek, &
             gen_der_ex_band,shift_vector_ex_band,berry_eigen_ex_band)
       end if
       write(*,*) '   Optical matrix elements (sp) have been written in file'
-   end subroutine get_ome_sp
+end subroutine get_ome_sp
 
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !    subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
@@ -325,9 +334,10 @@ contains
 !       complex*16 vme_der
 !       complex*16 berry_eigen1,berry_eigen2,berry_eigen
 !       complex*16 hk_ev_neigh,vme_neigh
-      subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
+subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
       shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
-      hk_ev_neigh,vme_neigh)
+      hk_ev_neigh,vme_neigh, &
+      skernel,hkernel,sderkernel,hderkernel,akernel,vme_der_phase)
       implicit none
 
       integer norb
@@ -335,22 +345,40 @@ contains
       integer ialpha,ialphap
       integer nj,njp
 
+      ! PATCH: hkernel, skernel, sderkernel, hderkernel, akernel are now dummy
+      ! arguments (the caller's own scratch buffers, reused here) instead of
+      ! locally-declared automatic arrays. This eliminates a second full-size
+      ! copy of each living on this subroutine's own stack frame on top of the
+      ! caller's copies -- previously the dominant remaining contributor to
+      ! stack usage in this routine (~1.36 MB combined at norb=88).
       dimension hkernel(norb,norb),skernel(norb,norb)
       dimension sderkernel(3,norb,norb),hderkernel(3,norb,norb)
-
-      dimension hk_ev(norb,norb),e(norb)
       dimension akernel(3,norb,norb)
 
-      dimension vjseudoa(3,norb,norb),vjseudob(3,norb,norb),vme(3,norb,norb)
+      ! PATCH: hk_ev(norb,norb) and vme(3,norb,norb) REMOVED. They were declared
+      ! here but never actually referenced anywhere in this subroutine's body --
+      ! every call to get_vme_kernels_ome/get_vme_eigen_ome writes its neighbor-
+      ! point results directly into slices of hk_ev_neigh/vme_neigh, not into
+      ! these. Dead automatic arrays; at norb=88 this alone was ~(1+3)*norb^2*16
+      ! bytes = ~495 KB of unused stack per call.
+      !
+      ! PATCH: vjseudoa(3,norb,norb), vjseudob(3,norb,norb) REMOVED for the same
+      ! reason -- declared, never referenced. ~745 KB combined at norb=88.
+
+      ! Small: kept as an ordinary automatic local. This is the neighbor-point
+      ! eigenvalue scratch, discarded after each get_vme_eigen_ome call -- NOT
+      ! the same as the caller's own e(norb), which still holds the CENTRAL
+      ! k-point's eigenvalues and must not be clobbered here.
+      dimension e(norb)
+
       dimension berry_eigen1(3,norb,norb),berry_eigen2(3,norb,norb)
       dimension berry_eigen(3,norb,norb)
       dimension vme_der(3,3,norb,norb)
+
+      ! PATCH: vme_der_phase is now a dummy argument (caller-allocated once per
+      ! thread) instead of a (3,3,norb,norb) automatic local here.
       dimension vme_der_phase(3,3,norb,norb)
 
-      ! PATCH: hk_ev_neigh, vme_neigh are now dummy arguments (allocated
-      ! once per OMP thread by the caller, get_ome_sp) instead of local
-      ! automatic arrays re-created on the stack every call. This was the
-      ! single largest stack consumer in this routine (~3.5 MB at norb=88).
       complex*16 :: hk_ev_neigh(7,norb,norb)
       complex*16 :: vme_neigh(7,3,norb,norb)
 
@@ -363,99 +391,89 @@ contains
       real*8 ph1,ph2,ph3,ph4,ph5,ph6
 
       complex*16 hkernel,akernel,skernel,sderkernel,hderkernel
-      complex*16 hk_ev,vjseudoa,vjseudob,vme
       complex*16 aux1,aux2,aux3,aux4,aux5,aux6
       complex*16 vme_der
       complex*16 berry_eigen1,berry_eigen2,berry_eigen
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-      ! PATCH: active_x/y/z are now module-level, computed once in
-      ! set_active_flags() -- no longer recomputed here on every one of the
-      ! ~8 calls per k-point.
+      ! active_x/y/z are module-level, computed once in set_active_flags() --
+      ! no longer recomputed here on every one of the ~8 calls per k-point.
 
-      vme=0.0d0
+      vme_der=0.0d0
+      shift_vector=0.0d0
+      vme_der_phase=0.0d0
       hk_ev_neigh=0.0d0
       vme_neigh=0.0d0
       berry_eigen1=0.0d0
       berry_eigen2=0.0d0
       berry_eigen=0.0d0
-      vme_der=0.0d0
-      shift_vector=0.0d0
-      vme_der_phase=0.0d0
 
       ! --- x-direction neighbours ---
       if (active_x) then
-         rkx_neigh=rkx-dk; rky_neigh=rky; rkz_neigh=rkz
-         call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
+      rkx_neigh=rkx-dk; rky_neigh=rky; rkz_neigh=rkz
+      call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev_neigh(1,:,:),e,vme_neigh(1,:,:,:))
 
-         rkx_neigh=rkx+dk
-         call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
+      rkx_neigh=rkx+dk
+      call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev_neigh(3,:,:),e,vme_neigh(3,:,:,:))
       else
-         ! PATCH: previously called get_vme_kernels_ome + get_vme_eigen_ome
-         ! TWICE at the same unshifted point to fill both neighbour slots,
-         ! even though both results are gated to zero by active_x anyway.
-         ! Now: compute once and copy into both slots (or just leave them
-         ! at the pre-zeroed default -- they're never used when active_x is
-         ! false, since the difference below is skipped). Left as an
-         ! explicit single call + copy for clarity / in case of future use.
-         rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz
-         call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
+      rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz
+      call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev_neigh(1,:,:),e,vme_neigh(1,:,:,:))
-         hk_ev_neigh(3,:,:) = hk_ev_neigh(1,:,:)
-         vme_neigh(3,:,:,:) = vme_neigh(1,:,:,:)
+      hk_ev_neigh(3,:,:) = hk_ev_neigh(1,:,:)
+      vme_neigh(3,:,:,:) = vme_neigh(1,:,:,:)
       end if
 
       ! --- y-direction neighbours ---
       if (active_y) then
-         rkx_neigh=rkx; rky_neigh=rky-dk; rkz_neigh=rkz
-         call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
+      rkx_neigh=rkx; rky_neigh=rky-dk; rkz_neigh=rkz
+      call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev_neigh(2,:,:),e,vme_neigh(2,:,:,:))
 
-         rky_neigh=rky+dk
-         call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
+      rky_neigh=rky+dk
+      call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev_neigh(4,:,:),e,vme_neigh(4,:,:,:))
       else
-         rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz
-         call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
+      rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz
+      call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev_neigh(2,:,:),e,vme_neigh(2,:,:,:))
-         hk_ev_neigh(4,:,:) = hk_ev_neigh(2,:,:)
-         vme_neigh(4,:,:,:) = vme_neigh(2,:,:,:)
+      hk_ev_neigh(4,:,:) = hk_ev_neigh(2,:,:)
+      vme_neigh(4,:,:,:) = vme_neigh(2,:,:,:)
       end if
 
       ! --- z-direction neighbours ---
       if (active_z) then
-         rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz-dk
-         call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
+      rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz-dk
+      call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev_neigh(5,:,:),e,vme_neigh(5,:,:,:))
 
-         rkz_neigh=rkz+dk
-         call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
+      rkz_neigh=rkz+dk
+      call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev_neigh(6,:,:),e,vme_neigh(6,:,:,:))
       else
-         rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz
-         call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
+      rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz
+      call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
-         call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
             hk_ev_neigh(5,:,:),e,vme_neigh(5,:,:,:))
-         hk_ev_neigh(6,:,:) = hk_ev_neigh(5,:,:)
-         vme_neigh(6,:,:,:) = vme_neigh(5,:,:,:)
+      hk_ev_neigh(6,:,:) = hk_ev_neigh(5,:,:)
+      vme_neigh(6,:,:,:) = vme_neigh(5,:,:,:)
       end if
 
       ! --- central point (index 7) ---
@@ -466,102 +484,97 @@ contains
             hk_ev_neigh(7,:,:),e,vme_neigh(7,:,:,:))
 
       do nn=1,norb
-         do nnp=1,norb
+      do nnp=1,norb
             do ialpha=1,norb
-               do ialphap=1,norb
+            do ialphap=1,norb
                   !x-dir
                   if (active_x) then
-                     aux1=(hk_ev_neigh(3,ialphap,nnp)-hk_ev_neigh(1,ialphap,nnp))/(2.0d0*dk)
-                     berry_eigen1(1,nn,nnp)=berry_eigen1(1,nn,nnp)+ &
+                  aux1=(hk_ev_neigh(3,ialphap,nnp)-hk_ev_neigh(1,ialphap,nnp))/(2.0d0*dk)
+                  berry_eigen1(1,nn,nnp)=berry_eigen1(1,nn,nnp)+ &
                         complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(7,ialpha,nn))*skernel(ialpha,ialphap)*aux1
                   end if
                   berry_eigen2(1,nn,nnp)=berry_eigen2(1,nn,nnp)+ &
-                     conjg(hk_ev_neigh(7,ialpha,nn))*hk_ev_neigh(7,ialphap,nnp)*akernel(1,ialpha,ialphap)
+                  conjg(hk_ev_neigh(7,ialpha,nn))*hk_ev_neigh(7,ialphap,nnp)*akernel(1,ialpha,ialphap)
 
                   !y-dir
                   if (active_y) then
-                     aux1=(hk_ev_neigh(4,ialphap,nnp)-hk_ev_neigh(2,ialphap,nnp))/(2.0d0*dk)
-                     berry_eigen1(2,nn,nnp)=berry_eigen1(2,nn,nnp)+ &
+                  aux1=(hk_ev_neigh(4,ialphap,nnp)-hk_ev_neigh(2,ialphap,nnp))/(2.0d0*dk)
+                  berry_eigen1(2,nn,nnp)=berry_eigen1(2,nn,nnp)+ &
                         complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(7,ialpha,nn))*skernel(ialpha,ialphap)*aux1
                   end if
                   berry_eigen2(2,nn,nnp)=berry_eigen2(2,nn,nnp)+ &
-                     conjg(hk_ev_neigh(7,ialpha,nn))*hk_ev_neigh(7,ialphap,nnp)*akernel(2,ialpha,ialphap)
+                  conjg(hk_ev_neigh(7,ialpha,nn))*hk_ev_neigh(7,ialphap,nnp)*akernel(2,ialpha,ialphap)
 
                   !z-dir
                   if (active_z) then
-                     aux1=(hk_ev_neigh(6,ialphap,nnp)-hk_ev_neigh(5,ialphap,nnp))/(2.0d0*dk)
-                     berry_eigen1(3,nn,nnp)=berry_eigen1(3,nn,nnp)+ &
+                  aux1=(hk_ev_neigh(6,ialphap,nnp)-hk_ev_neigh(5,ialphap,nnp))/(2.0d0*dk)
+                  berry_eigen1(3,nn,nnp)=berry_eigen1(3,nn,nnp)+ &
                         complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(7,ialpha,nn))*skernel(ialpha,ialphap)*aux1
                   end if
                   berry_eigen2(3,nn,nnp)=berry_eigen2(3,nn,nnp)+ &
-                     conjg(hk_ev_neigh(7,ialpha,nn))*hk_ev_neigh(7,ialphap,nnp)*akernel(3,ialpha,ialphap)
-               end do
+                  conjg(hk_ev_neigh(7,ialpha,nn))*hk_ev_neigh(7,ialphap,nnp)*akernel(3,ialpha,ialphap)
+            end do
             end do
 
             do nj=1,3
-               berry_eigen(nj,nn,nnp)=berry_eigen1(nj,nn,nnp)+berry_eigen2(nj,nn,nnp)
-               if (abs(berry_eigen(nj,nn,nnp)).gt.clip_threshold) then
+            berry_eigen(nj,nn,nnp)=berry_eigen1(nj,nn,nnp)+berry_eigen2(nj,nn,nnp)
+            if (abs(berry_eigen(nj,nn,nnp)).gt.clip_threshold) then
                   berry_eigen(nj,nn,nnp)=0.0d0
-               end if
+            end if
 
-               aux1=vme_neigh(1,nj,nn,nnp); aux3=vme_neigh(3,nj,nn,nnp)
-               aux2=vme_neigh(2,nj,nn,nnp); aux4=vme_neigh(4,nj,nn,nnp)
-               aux5=vme_neigh(5,nj,nn,nnp); aux6=vme_neigh(6,nj,nn,nnp)
+            aux1=vme_neigh(1,nj,nn,nnp); aux3=vme_neigh(3,nj,nn,nnp)
+            aux2=vme_neigh(2,nj,nn,nnp); aux4=vme_neigh(4,nj,nn,nnp)
+            aux5=vme_neigh(5,nj,nn,nnp); aux6=vme_neigh(6,nj,nn,nnp)
 
-               if (active_x) then
+            if (active_x) then
                   vme_der(1,nj,nn,nnp)=(aux3-aux1)/(2.0d0*dk)
-               end if
-               if (active_y) then
+            end if
+            if (active_y) then
                   vme_der(2,nj,nn,nnp)=(aux4-aux2)/(2.0d0*dk)
-               end if
-               if (active_z) then
+            end if
+            if (active_z) then
                   vme_der(3,nj,nn,nnp)=(aux6-aux5)/(2.0d0*dk)
-               end if
+            end if
 
-               call get_phase(vme_neigh(1,nj,nn,nnp),ph1)
-               call get_phase(vme_neigh(3,nj,nn,nnp),ph3)
-               call get_phase(vme_neigh(2,nj,nn,nnp),ph2)
-               call get_phase(vme_neigh(4,nj,nn,nnp),ph4)
-               call get_phase(vme_neigh(5,nj,nn,nnp),ph5)
-               call get_phase(vme_neigh(6,nj,nn,nnp),ph6)
+            call get_phase(vme_neigh(1,nj,nn,nnp),ph1)
+            call get_phase(vme_neigh(3,nj,nn,nnp),ph3)
+            call get_phase(vme_neigh(2,nj,nn,nnp),ph2)
+            call get_phase(vme_neigh(4,nj,nn,nnp),ph4)
+            call get_phase(vme_neigh(5,nj,nn,nnp),ph5)
+            call get_phase(vme_neigh(6,nj,nn,nnp),ph6)
 
-               if (active_x) then
+            if (active_x) then
                   vme_der_phase(1,nj,nn,nnp)=(ph3-ph1)/(2.0d0*dk)
-               end if
-               if (active_y) then
+            end if
+            if (active_y) then
                   vme_der_phase(2,nj,nn,nnp)=(ph4-ph2)/(2.0d0*dk)
-               end if
-               if (active_z) then
+            end if
+            if (active_z) then
                   vme_der_phase(3,nj,nn,nnp)=(ph6-ph5)/(2.0d0*dk)
-               end if
-               ! Note: vme_der / vme_der_phase were initialised to 0.0d0
-               ! above, so inactive directions are explicitly zero rather
-               ! than left as uninitialised stack memory (see the old 2D
-               ! version, where the z-slot of vme_der_phase was read
-               ! without ever being assigned).
+            end if
             end do
-         end do
+      end do
       end do
 
       !shift vector
       do nn=1,norb
-         do nnp=1,norb
+      do nnp=1,norb
             do nj=1,3
-               do njp=1,3
+            do njp=1,3
                   shift_vector(nj,njp,nn,nnp)=-vme_der_phase(nj,njp,nn,nnp) &
-                     +(realpart(berry_eigen(nj,nn,nn))-realpart(berry_eigen(nj,nnp,nnp)))
+                  +(realpart(berry_eigen(nj,nn,nn))-realpart(berry_eigen(nj,nnp,nnp)))
                   if (abs(shift_vector(nj,njp,nn,nnp)).gt.clip_threshold) then
-                     shift_vector(nj,njp,nn,nnp)=0.0d0
+                  shift_vector(nj,njp,nn,nnp)=0.0d0
                   end if
                   vme_der(nj,njp,nn,nnp)=vme_der(nj,njp,nn,nnp) &
-                     -complex(0.0d0,1.0d0)*vme_neigh(7,njp,nn,nnp) &
-                     *(realpart(berry_eigen(nj,nn,nn))-realpart(berry_eigen(nj,nnp,nnp)))
-               end do
+                  -complex(0.0d0,1.0d0)*vme_neigh(7,njp,nn,nnp) &
+                  *(realpart(berry_eigen(nj,nn,nn))-realpart(berry_eigen(nj,nnp,nnp)))
             end do
-         end do
+            end do
+      end do
       end do
 
-   end subroutine get_berry_eigen_fourpoint
+end subroutine get_berry_eigen_fourpoint
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    subroutine get_phase(aux1,ph)
       real*8 ph
