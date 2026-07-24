@@ -214,7 +214,8 @@ subroutine get_ome_sp(iflag_norder)
 
       allocate(gd1(3,3,norb,norb), gd2(3,3,norb,norb), gd3(3,3,norb,norb))
       allocate(gen_der(3,3,norb,norb), vme_der(3,3,norb,norb))
-      allocate(hk_ev_neigh(7,norb,norb), vme_neigh(7,3,norb,norb))
+      !allocate(hk_ev_neigh(7,norb,norb), vme_neigh(7,3,norb,norb))
+      allocate(hk_ev_neigh(norb,norb,7), vme_neigh(3,norb,norb,7))
       ! PATCH: allocated once per thread here instead of once per call inside
       ! get_berry_eigen_fourpoint.
       allocate(vme_der_phase(3,3,norb,norb))
@@ -380,9 +381,12 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
       ! thread) instead of a (3,3,norb,norb) automatic local here.
       dimension vme_der_phase(3,3,norb,norb)
 
-      complex*16 :: hk_ev_neigh(7,norb,norb)
-      complex*16 :: vme_neigh(7,3,norb,norb)
-
+      !complex*16 :: hk_ev_neigh(7,norb,norb)
+      !complex*16 :: vme_neigh(7,3,norb,norb)
+      complex*16 :: hk_ev_neigh(norb,norb,7)
+      complex*16 :: vme_neigh(3,norb,norb,7)
+      
+      
       dimension shift_vector(3,3,norb,norb)
 
       real*8 rkx,rky,rkz,rkx_neigh,rky_neigh,rkz_neigh
@@ -414,21 +418,21 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(1,:,:),e,vme_neigh(1,:,:,:))
+            hk_ev_neigh(:,:,1),e,vme_neigh(:,:,:,1))
 
       rkx_neigh=rkx+dk
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(3,:,:),e,vme_neigh(3,:,:,:))
+            hk_ev_neigh(:,:,3),e,vme_neigh(:,:,:,3))
       else
       rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(1,:,:),e,vme_neigh(1,:,:,:))
-      hk_ev_neigh(3,:,:) = hk_ev_neigh(1,:,:)
-      vme_neigh(3,:,:,:) = vme_neigh(1,:,:,:)
+            hk_ev_neigh(:,:,1),e,vme_neigh(:,:,:,1))
+      hk_ev_neigh(:,:,3) = hk_ev_neigh(:,:,1)
+      vme_neigh(:,:,:,3) = vme_neigh(:,:,:,1)
       end if
 
       ! --- y-direction neighbours ---
@@ -437,21 +441,21 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(2,:,:),e,vme_neigh(2,:,:,:))
+            hk_ev_neigh(:,:,2),e,vme_neigh(:,:,:,2))
 
       rky_neigh=rky+dk
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(4,:,:),e,vme_neigh(4,:,:,:))
+            hk_ev_neigh(:,:,4),e,vme_neigh(:,:,:,4))
       else
       rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(2,:,:),e,vme_neigh(2,:,:,:))
-      hk_ev_neigh(4,:,:) = hk_ev_neigh(2,:,:)
-      vme_neigh(4,:,:,:) = vme_neigh(2,:,:,:)
+            hk_ev_neigh(:,:,2),e,vme_neigh(:,:,:,2))
+      hk_ev_neigh(:,:,4) = hk_ev_neigh(:,:,2)
+      vme_neigh(:,:,:,4) = vme_neigh(:,:,:,2)
       end if
 
       ! --- z-direction neighbours ---
@@ -460,21 +464,21 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(5,:,:),e,vme_neigh(5,:,:,:))
+            hk_ev_neigh(:,:,5),e,vme_neigh(:,:,:,5))
 
       rkz_neigh=rkz+dk
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(6,:,:),e,vme_neigh(6,:,:,:))
+            hk_ev_neigh(:,:,6),e,vme_neigh(:,:,:,6))
       else
       rkx_neigh=rkx; rky_neigh=rky; rkz_neigh=rkz
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(5,:,:),e,vme_neigh(5,:,:,:))
-      hk_ev_neigh(6,:,:) = hk_ev_neigh(5,:,:)
-      vme_neigh(6,:,:,:) = vme_neigh(5,:,:,:)
+            hk_ev_neigh(:,:,5),e,vme_neigh(:,:,:,5))
+      hk_ev_neigh(:,:,6) = hk_ev_neigh(:,:,5)
+      vme_neigh(:,:,:,6) = vme_neigh(:,:,:,5)
       end if
 
       ! --- central point (index 7) ---
@@ -482,7 +486,7 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
       call get_vme_kernels_ome(rkx_neigh,rky_neigh,rkz_neigh,norb,skernel, &
             sderkernel,hkernel,hderkernel,akernel)
       call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev_neigh(7,:,:),e,vme_neigh(7,:,:,:))
+            hk_ev_neigh(:,:,7),e,vme_neigh(:,:,:,7))
 
       do nn=1,norb
       do nnp=1,norb
@@ -490,30 +494,30 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
             do ialphap=1,norb
                   !x-dir
                   if (active_x) then
-                  aux1=(hk_ev_neigh(3,ialphap,nnp)-hk_ev_neigh(1,ialphap,nnp))/(2.0d0*dk)
+                  aux1=(hk_ev_neigh(ialphap,nnp,3)-hk_ev_neigh(ialphap,nnp,1))/(2.0d0*dk)
                   berry_eigen1(1,nn,nnp)=berry_eigen1(1,nn,nnp)+ &
-                        complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(7,ialpha,nn))*skernel(ialpha,ialphap)*aux1
+                        complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(ialpha,nn,7))*skernel(ialpha,ialphap)*aux1
                   end if
                   berry_eigen2(1,nn,nnp)=berry_eigen2(1,nn,nnp)+ &
-                  conjg(hk_ev_neigh(7,ialpha,nn))*hk_ev_neigh(7,ialphap,nnp)*akernel(1,ialpha,ialphap)
+                  conjg(hk_ev_neigh(ialpha,nn,7))*hk_ev_neigh(ialphap,nnp,7)*akernel(1,ialpha,ialphap)
 
                   !y-dir
                   if (active_y) then
-                  aux1=(hk_ev_neigh(4,ialphap,nnp)-hk_ev_neigh(2,ialphap,nnp))/(2.0d0*dk)
+                  aux1=(hk_ev_neigh(ialphap,nnp,4)-hk_ev_neigh(ialphap,nnp,2))/(2.0d0*dk)
                   berry_eigen1(2,nn,nnp)=berry_eigen1(2,nn,nnp)+ &
-                        complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(7,ialpha,nn))*skernel(ialpha,ialphap)*aux1
+                        complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(ialpha,nn,7))*skernel(ialpha,ialphap)*aux1
                   end if
                   berry_eigen2(2,nn,nnp)=berry_eigen2(2,nn,nnp)+ &
-                  conjg(hk_ev_neigh(7,ialpha,nn))*hk_ev_neigh(7,ialphap,nnp)*akernel(2,ialpha,ialphap)
+                  conjg(hk_ev_neigh(ialpha,nn,7))*hk_ev_neigh(ialphap,nnp,7)*akernel(2,ialpha,ialphap)
 
                   !z-dir
                   if (active_z) then
-                  aux1=(hk_ev_neigh(6,ialphap,nnp)-hk_ev_neigh(5,ialphap,nnp))/(2.0d0*dk)
+                  aux1=(hk_ev_neigh(ialphap,nnp,6)-hk_ev_neigh(ialphap,nnp,5))/(2.0d0*dk)
                   berry_eigen1(3,nn,nnp)=berry_eigen1(3,nn,nnp)+ &
-                        complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(7,ialpha,nn))*skernel(ialpha,ialphap)*aux1
+                        complex(0.0d0,1.0d0)*conjg(hk_ev_neigh(ialpha,nn,7))*skernel(ialpha,ialphap)*aux1
                   end if
                   berry_eigen2(3,nn,nnp)=berry_eigen2(3,nn,nnp)+ &
-                  conjg(hk_ev_neigh(7,ialpha,nn))*hk_ev_neigh(7,ialphap,nnp)*akernel(3,ialpha,ialphap)
+                  conjg(hk_ev_neigh(ialpha,nn,7))*hk_ev_neigh(ialphap,nnp,7)*akernel(3,ialpha,ialphap)
             end do
             end do
 
@@ -523,9 +527,9 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
                   berry_eigen(nj,nn,nnp)=0.0d0
             end if
 
-            aux1=vme_neigh(1,nj,nn,nnp); aux3=vme_neigh(3,nj,nn,nnp)
-            aux2=vme_neigh(2,nj,nn,nnp); aux4=vme_neigh(4,nj,nn,nnp)
-            aux5=vme_neigh(5,nj,nn,nnp); aux6=vme_neigh(6,nj,nn,nnp)
+            aux1=vme_neigh(nj,nn,nnp,1); aux3=vme_neigh(nj,nn,nnp,3)
+            aux2=vme_neigh(nj,nn,nnp,2); aux4=vme_neigh(nj,nn,nnp,4)
+            aux5=vme_neigh(nj,nn,nnp,5); aux6=vme_neigh(nj,nn,nnp,6)
 
             if (active_x) then
                   vme_der(1,nj,nn,nnp)=(aux3-aux1)/(2.0d0*dk)
@@ -537,12 +541,12 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
                   vme_der(3,nj,nn,nnp)=(aux6-aux5)/(2.0d0*dk)
             end if
 
-            call get_phase(vme_neigh(1,nj,nn,nnp),ph1)
-            call get_phase(vme_neigh(3,nj,nn,nnp),ph3)
-            call get_phase(vme_neigh(2,nj,nn,nnp),ph2)
-            call get_phase(vme_neigh(4,nj,nn,nnp),ph4)
-            call get_phase(vme_neigh(5,nj,nn,nnp),ph5)
-            call get_phase(vme_neigh(6,nj,nn,nnp),ph6)
+            call get_phase(vme_neigh(nj,nn,nnp,1),ph1)
+            call get_phase(vme_neigh(nj,nn,nnp,3),ph3)
+            call get_phase(vme_neigh(nj,nn,nnp,2),ph2)
+            call get_phase(vme_neigh(nj,nn,nnp,4),ph4)
+            call get_phase(vme_neigh(nj,nn,nnp,5),ph5)
+            call get_phase(vme_neigh(nj,nn,nnp,6),ph6)
 
             if (active_x) then
                   vme_der_phase(1,nj,nn,nnp)=(ph3-ph1)/(2.0d0*dk)
@@ -568,7 +572,7 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
                   shift_vector(nj,njp,nn,nnp)=0.0d0
                   end if
                   vme_der(nj,njp,nn,nnp)=vme_der(nj,njp,nn,nnp) &
-                  -complex(0.0d0,1.0d0)*vme_neigh(7,njp,nn,nnp) &
+                  -complex(0.0d0,1.0d0)*vme_neigh(njp,nn,nnp,7) &
                   *(realpart(berry_eigen(nj,nn,nn))-realpart(berry_eigen(nj,nnp,nnp)))
             end do
             end do
