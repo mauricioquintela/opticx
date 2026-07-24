@@ -291,6 +291,7 @@ subroutine get_ome_sp(iflag_norder)
       write(*,*) '   Optical matrix elements (sp) have been written in file'
 end subroutine get_ome_sp
 
+
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !    subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
 !       shift_vector,berry_eigen1,berry_eigen2,berry_eigen)
