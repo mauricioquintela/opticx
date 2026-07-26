@@ -161,10 +161,24 @@ subroutine get_ome_sp(iflag_norder)
       integer ibz
       integer i,j,ii,jj,nj
 
-      ! Small per-thread temporaries: fine as automatic (stack) arrays.
-      complex*16 :: skernel(norb,norb), hkernel(norb,norb)
-      complex*16 :: sderkernel(3,norb,norb), hderkernel(3,norb,norb)
-      complex*16 :: akernel(3,norb,norb)
+      ! PATCH: skernel, hkernel, sderkernel, hderkernel, akernel moved from
+      ! automatic (stack) arrays to allocatable (heap), allocated once per
+      ! thread on entry to the parallel region -- same treatment already
+      ! given to gd1/gd2/gd3/gen_der/vme_der/hk_ev_neigh/vme_neigh. At
+      ! norb=88 these five arrays alone were ~1.36 MB of per-thread stack
+      ! (124 KB x2 for skernel/hkernel + 372 KB x3 for sderkernel/
+      ! hderkernel/akernel); combined with everything else on the frame,
+      ! that was enough that OMP_STACKSIZE had to be raised to 4 GB/thread
+      ! to avoid corruption -- which then OOM-killed the job once
+      ! multiplied across all threads. Moving these to the heap removes
+      ! that multiplier: heap memory is a shared pool sized once for the
+      ! whole process, not duplicated per-thread the way stack reservations
+      ! are, so OMP_STACKSIZE can be brought back down to a much smaller,
+      ! safer value (e.g. the default, or a modest explicit value like
+      ! 256M) without reintroducing the original corruption.
+      complex*16, allocatable :: skernel(:,:), hkernel(:,:)
+      complex*16, allocatable :: sderkernel(:,:,:), hderkernel(:,:,:)
+      complex*16, allocatable :: akernel(:,:,:)
 
       real(8)    :: e(norb)
       complex*16 :: hk_ev(norb,norb)
@@ -175,15 +189,10 @@ subroutine get_ome_sp(iflag_norder)
       complex*16 :: berry_eigen1(3,norb,norb), berry_eigen2(3,norb,norb)
       complex*16 :: berry_eigen(3,norb,norb)
 
-      ! Previously allocatable, already moved off the stack in an earlier pass.
       complex*16, allocatable :: gd1(:,:,:,:), gd2(:,:,:,:), gd3(:,:,:,:)
       complex*16, allocatable :: gen_der(:,:,:,:), vme_der(:,:,:,:)
       complex*16, allocatable :: hk_ev_neigh(:,:,:), vme_neigh(:,:,:,:)
 
-      ! PATCH: vme_der_phase was a (3,3,norb,norb) automatic local INSIDE
-      ! get_berry_eigen_fourpoint (~557 KB at norb=88, real*8). Moved here,
-      ! allocated once per thread, and passed down as a dummy argument --
-      ! same treatment already given to hk_ev_neigh/vme_neigh.
       real(8), allocatable :: vme_der_phase(:,:,:,:)
 
       real(8) :: rkx,rky,rkz
@@ -212,12 +221,15 @@ subroutine get_ome_sp(iflag_norder)
       !$OMP PRIVATE(vme_der,shift_vector,berry_eigen1,berry_eigen2,berry_eigen), &
       !$OMP PRIVATE(hk_ev_neigh,vme_neigh,vme_der_phase)
 
+      ! PATCH: skernel/hkernel/sderkernel/hderkernel/akernel now allocated
+      ! here, once per thread, alongside the other per-thread scratch.
+      allocate(skernel(norb,norb), hkernel(norb,norb))
+      allocate(sderkernel(3,norb,norb), hderkernel(3,norb,norb))
+      allocate(akernel(3,norb,norb))
+
       allocate(gd1(3,3,norb,norb), gd2(3,3,norb,norb), gd3(3,3,norb,norb))
       allocate(gen_der(3,3,norb,norb), vme_der(3,3,norb,norb))
-      !allocate(hk_ev_neigh(7,norb,norb), vme_neigh(7,3,norb,norb))
       allocate(hk_ev_neigh(norb,norb,7), vme_neigh(3,norb,norb,7))
-      ! PATCH: allocated once per thread here instead of once per call inside
-      ! get_berry_eigen_fourpoint.
       allocate(vme_der_phase(3,3,norb,norb))
 
       !$OMP DO
@@ -234,19 +246,6 @@ subroutine get_ome_sp(iflag_norder)
 
       if (iflag_norder.eq.2) then
             call get_gen_der_sumrule(norb,vme,e,abc,gen_der,gd1,gd2,gd3)
-            ! PATCH: skernel, hkernel, sderkernel, hderkernel, akernel, and
-            ! vme_der_phase are now passed in as scratch buffers owned by this
-            ! (calling) frame, instead of get_berry_eigen_fourpoint declaring
-            ! its own second full-size copies of each on its own stack frame.
-            ! This is safe: the caller's skernel/hkernel/etc. values from the
-            ! CENTRAL k-point (used just above) are legitimately overwritten by
-            ! the neighbor-point evaluations inside get_berry_eigen_fourpoint,
-            ! but nothing after this call in get_ome_sp reads them again before
-            ! the next iteration re-fills them via get_vme_kernels_ome. e and
-            ! vme (central-point eigenvalues/matrix elements) ARE read again
-            ! just below (ek(ibz,i)=e(ii), vme_ex_band(...)=vme(...)), so those
-            ! two are NOT passed down -- get_berry_eigen_fourpoint keeps its
-            ! own small local scratch for the neighbor eigenvalues it discards.
             call get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
             shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
             hk_ev_neigh,vme_neigh, &
@@ -278,6 +277,9 @@ subroutine get_ome_sp(iflag_norder)
       end do
       !$OMP END DO
 
+      ! PATCH: skernel/hkernel/sderkernel/hderkernel/akernel added to the
+      ! per-thread deallocation, mirroring their new allocate() above.
+      deallocate(skernel,hkernel,sderkernel,hderkernel,akernel)
       deallocate(gd1,gd2,gd3,gen_der,vme_der,hk_ev_neigh,vme_neigh,vme_der_phase)
       !$OMP END PARALLEL
 
