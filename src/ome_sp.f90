@@ -161,21 +161,6 @@ subroutine get_ome_sp(iflag_norder)
       integer ibz
       integer i,j,ii,jj,nj
 
-      ! PATCH: skernel, hkernel, sderkernel, hderkernel, akernel moved from
-      ! automatic (stack) arrays to allocatable (heap), allocated once per
-      ! thread on entry to the parallel region -- same treatment already
-      ! given to gd1/gd2/gd3/gen_der/vme_der/hk_ev_neigh/vme_neigh. At
-      ! norb=88 these five arrays alone were ~1.36 MB of per-thread stack
-      ! (124 KB x2 for skernel/hkernel + 372 KB x3 for sderkernel/
-      ! hderkernel/akernel); combined with everything else on the frame,
-      ! that was enough that OMP_STACKSIZE had to be raised to 4 GB/thread
-      ! to avoid corruption -- which then OOM-killed the job once
-      ! multiplied across all threads. Moving these to the heap removes
-      ! that multiplier: heap memory is a shared pool sized once for the
-      ! whole process, not duplicated per-thread the way stack reservations
-      ! are, so OMP_STACKSIZE can be brought back down to a much smaller,
-      ! safer value (e.g. the default, or a modest explicit value like
-      ! 256M) without reintroducing the original corruption.
       complex*16, allocatable :: skernel(:,:), hkernel(:,:)
       complex*16, allocatable :: sderkernel(:,:,:), hderkernel(:,:,:)
       complex*16, allocatable :: akernel(:,:,:)
@@ -189,7 +174,14 @@ subroutine get_ome_sp(iflag_norder)
       complex*16 :: berry_eigen1(3,norb,norb), berry_eigen2(3,norb,norb)
       complex*16 :: berry_eigen(3,norb,norb)
 
-      complex*16, allocatable :: gd1(:,:,:,:), gd2(:,:,:,:), gd3(:,:,:,:)
+      ! PATCH: gd1, gd2, gd3 REMOVED from this scope entirely. They were
+      ! allocatable, per-thread, persistent for the whole k-loop -- but
+      ! they're pure intermediates used only inside get_gen_der_sumrule to
+      ! build gen_der, never read anywhere else. Moved to automatic
+      ! (stack) locals declared inside get_gen_der_sumrule itself, so each
+      ! call gets a transient ~3.19 MB (at norb=88) that's freed the
+      ! instant the subroutine returns, instead of ~3.19 MB standing on
+      ! the heap per thread for the entire run.
       complex*16, allocatable :: gen_der(:,:,:,:), vme_der(:,:,:,:)
       complex*16, allocatable :: hk_ev_neigh(:,:,:), vme_neigh(:,:,:,:)
 
@@ -217,17 +209,15 @@ subroutine get_ome_sp(iflag_norder)
       !$OMP PARALLEL PRIVATE(rkx,rky,rkz,ibz,i,j,ii,jj,nj), &
       !$OMP PRIVATE(hkernel,skernel,sderkernel,hderkernel,akernel), &
       !$OMP PRIVATE(hk_ev,e,vme), &
-      !$OMP PRIVATE(abc,gen_der,gd1,gd2,gd3), &
+      !$OMP PRIVATE(abc,gen_der), &
       !$OMP PRIVATE(vme_der,shift_vector,berry_eigen1,berry_eigen2,berry_eigen), &
       !$OMP PRIVATE(hk_ev_neigh,vme_neigh,vme_der_phase)
 
-      ! PATCH: skernel/hkernel/sderkernel/hderkernel/akernel now allocated
-      ! here, once per thread, alongside the other per-thread scratch.
       allocate(skernel(norb,norb), hkernel(norb,norb))
       allocate(sderkernel(3,norb,norb), hderkernel(3,norb,norb))
       allocate(akernel(3,norb,norb))
 
-      allocate(gd1(3,3,norb,norb), gd2(3,3,norb,norb), gd3(3,3,norb,norb))
+      ! PATCH: gd1/gd2/gd3 no longer allocated here -- removed.
       allocate(gen_der(3,3,norb,norb), vme_der(3,3,norb,norb))
       allocate(hk_ev_neigh(norb,norb,7), vme_neigh(3,norb,norb,7))
       allocate(vme_der_phase(3,3,norb,norb))
@@ -245,7 +235,9 @@ subroutine get_ome_sp(iflag_norder)
             hk_ev,e,vme)
 
       if (iflag_norder.eq.2) then
-            call get_gen_der_sumrule(norb,vme,e,abc,gen_der,gd1,gd2,gd3)
+            ! PATCH: gd1, gd2, gd3 no longer passed in -- get_gen_der_sumrule
+            ! now declares them itself as call-scoped automatic locals.
+            call get_gen_der_sumrule(norb,vme,e,abc,gen_der)
             call get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
             shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
             hk_ev_neigh,vme_neigh, &
@@ -277,10 +269,9 @@ subroutine get_ome_sp(iflag_norder)
       end do
       !$OMP END DO
 
-      ! PATCH: skernel/hkernel/sderkernel/hderkernel/akernel added to the
-      ! per-thread deallocation, mirroring their new allocate() above.
       deallocate(skernel,hkernel,sderkernel,hderkernel,akernel)
-      deallocate(gd1,gd2,gd3,gen_der,vme_der,hk_ev_neigh,vme_neigh,vme_der_phase)
+      ! PATCH: gd1/gd2/gd3 no longer in this list -- removed.
+      deallocate(gen_der,vme_der,hk_ev_neigh,vme_neigh,vme_der_phase)
       !$OMP END PARALLEL
 
       write(*,*) '   Writing optical matrix elements (sp) into file'
@@ -594,11 +585,7 @@ end subroutine get_berry_eigen_fourpoint
       end if
    end subroutine get_phase
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-   subroutine get_gen_der_sumrule(norb,vme,e,abc,gen_der,gd1,gd2,gd3)
-      ! PATCH: was `implicit real*8 (a-h,o-z)`, i.e. any mistyped/new
-      ! variable name silently became an implicitly-typed real or integer
-      ! instead of a compile-time error. Switched to implicit none like
-      ! every other routine in the module.
+   subroutine get_gen_der_sumrule(norb,vme,e,abc,gen_der)
       implicit none
 
       integer norb,norb_inter_cut
@@ -608,15 +595,19 @@ end subroutine get_berry_eigen_fourpoint
       dimension e(norb)
       dimension vme(3,norb,norb)
       dimension gen_der(3,3,norb,norb)
-      dimension gd1(3,3,norb,norb)
-      dimension gd2(3,3,norb,norb)
-      dimension gd3(3,3,norb,norb)
       dimension abc(3,norb,norb)
 
       real*8 e
-      ! PATCH: removed unused aux1,aux2,aux3.
-      complex*16 vme,gen_der,abc,gd1,gd2,gd3
-      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      complex*16 vme,gen_der,abc
+
+      ! PATCH: gd1, gd2, gd3 moved here from get_ome_sp's persistent
+      ! per-thread heap allocations to plain automatic (stack) locals,
+      ! scoped to this call only. Each call reserves ~3.19 MB (at
+      ! norb=88) on the stack transiently and frees it on return, rather
+      ! than the previous ~3.19 MB standing on the heap per thread for
+      ! the entire k-point loop's duration.
+      complex*16 :: gd1(3,3,norb,norb), gd2(3,3,norb,norb), gd3(3,3,norb,norb)
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       abc=0.0d0
       gd1=0.0d0
       gd2=0.0d0
