@@ -247,76 +247,77 @@ subroutine get_ome_sp(iflag_norder)
 
       !$OMP DO SCHEDULE(DYNAMIC) ORDERED
       do ibz=1,npointstotal
-      write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
-      rkx=rkxvector(ibz)
-      rky=rkyvector(ibz)
-      rkz=rkzvector(ibz)
+            rkx=rkxvector(ibz)
+            rky=rkyvector(ibz)
+            rkz=rkzvector(ibz)
 
-      call get_vme_kernels_ome(rkx,rky,rkz,norb,skernel,sderkernel, &
-            hkernel,hderkernel,akernel)
-      call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
-            hk_ev,e,vme)
+            call get_vme_kernels_ome(rkx,rky,rkz,norb,skernel,sderkernel, &
+                  hkernel,hderkernel,akernel)
+            call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
+                  hk_ev,e,vme)
 
-      if (iflag_norder.eq.2) then
-            call get_gen_der_sumrule(norb,vme,e,abc,gen_der)
-            call get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
-            shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
-            hk_ev_neigh,vme_neigh, &
-            skernel,hkernel,sderkernel,hderkernel,akernel,vme_der_phase)
-      end if
+            if (iflag_norder.eq.2) then
+                  call get_gen_der_sumrule(norb,vme,e,abc,gen_der)
+                  call get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der, &
+                  shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
+                  hk_ev_neigh,vme_neigh, &
+                  skernel,hkernel,sderkernel,hderkernel,akernel,vme_der_phase)
+            end if
 
-      ! Band-map this k-point's results into the small per-thread buffers
-      ! declared above, exactly as before, just no longer writing into a
-      ! shared full-size array indexed by ibz.
-      do i=1,nband_ex
-            ii=nband_index(i)
-            ek_i(i)=e(ii)
-            do nj=1,3
-            do j=1,nband_ex
-                  jj=nband_index(j)
-                  vme_band(nj,i,j)=vme(nj,ii,jj)
+            ! Band-map this k-point's results into the small per-thread buffers
+            ! declared above, exactly as before, just no longer writing into a
+            ! shared full-size array indexed by ibz.
+            do i=1,nband_ex
+                  ii=nband_index(i)
+                  ek_i(i)=e(ii)
+                  do nj=1,3
+                        do j=1,nband_ex
+                              jj=nband_index(j)
+                              vme_band(nj,i,j)=vme(nj,ii,jj)
 
-                  if (iflag_norder.eq.2) then
-                  shift_band(nj,1,i,j)=shift_vector(nj,1,ii,jj)
-                  shift_band(nj,2,i,j)=shift_vector(nj,2,ii,jj)
-                  shift_band(nj,3,i,j)=shift_vector(nj,3,ii,jj)
+                              if (iflag_norder.eq.2) then
+                                    shift_band(nj,1,i,j)=shift_vector(nj,1,ii,jj)
+                                    shift_band(nj,2,i,j)=shift_vector(nj,2,ii,jj)
+                                    shift_band(nj,3,i,j)=shift_vector(nj,3,ii,jj)
 
-                  gender_band(nj,1,i,j)=gen_der(nj,1,ii,jj)
-                  gender_band(nj,2,i,j)=gen_der(nj,2,ii,jj)
-                  gender_band(nj,3,i,j)=gen_der(nj,3,ii,jj)
+                                    gender_band(nj,1,i,j)=gen_der(nj,1,ii,jj)
+                                    gender_band(nj,2,i,j)=gen_der(nj,2,ii,jj)
+                                    gender_band(nj,3,i,j)=gen_der(nj,3,ii,jj)
 
-                  berry_band(nj,i,j)=berry_eigen(nj,ii,jj)
-                  end if
+                                    berry_band(nj,i,j)=berry_eigen(nj,ii,jj)
+                              end if
+                        end do
+                  end do
             end do
-            end do
-      end do
 
-      ! PATCH: actual disk write happens here, inside an ORDERED region.
-      ! Threads compute k-points in whatever order SCHEDULE(DYNAMIC) hands
-      ! them out, but ORDERED forces entry into this block to happen in
-      ! strict ibz=1,2,3,... sequence -- matching the on-disk format that
-      ! read_ome_sp_linear/read_ome_sp_nonlinear expect (they read
-      ! sequentially with no ibz index stored per-record). This is the
-      ! same technique already used in print_sigma_second_ex and the
-      ! k-resolved write in get_ome_ex.
-      !$OMP ORDERED
-      if (iflag_norder.eq.1) then
-         write(u_out,*) rkx,rky,rkz,(ek_i(j),j=1,nband_ex)
-         do i=1,nband_ex
-            do j=1,nband_ex
-               write(u_out,*) rkx,rky,rkz, &
-                  (realpart(vme_band(nj,i,j)),aimag(vme_band(nj,i,j)), nj=1,3)
-            end do
-         end do
-      end if
-      if (iflag_norder.eq.2) then
-         write(u_out) ek_i(:)
-         write(u_out) vme_band(:,:,:)
-         write(u_out) berry_band(:,:,:)
-         write(u_out) shift_band(:,:,:,:)
-         write(u_out) gender_band(:,:,:,:)
-      end if
-      !$OMP END ORDERED
+            ! PATCH: actual disk write happens here, inside an ORDERED region.
+            ! Threads compute k-points in whatever order SCHEDULE(DYNAMIC) hands
+            ! them out, but ORDERED forces entry into this block to happen in
+            ! strict ibz=1,2,3,... sequence -- matching the on-disk format that
+            ! read_ome_sp_linear/read_ome_sp_nonlinear expect (they read
+            ! sequentially with no ibz index stored per-record). This is the
+            ! same technique already used in print_sigma_second_ex and the
+            ! k-resolved write in get_ome_ex.
+            !$OMP ORDERED
+            write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
+            
+            if (iflag_norder.eq.1) then
+                  write(u_out,*) rkx,rky,rkz,(ek_i(j),j=1,nband_ex)
+                  do i=1,nband_ex
+                        do j=1,nband_ex
+                        write(u_out,*) rkx,rky,rkz, &
+                              (realpart(vme_band(nj,i,j)),aimag(vme_band(nj,i,j)), nj=1,3)
+                        end do
+                  end do
+            end if
+            if (iflag_norder.eq.2) then
+                  write(u_out) ek_i(:)
+                  write(u_out) vme_band(:,:,:)
+                  write(u_out) berry_band(:,:,:)
+                  write(u_out) shift_band(:,:,:,:)
+                  write(u_out) gender_band(:,:,:,:)
+            end if
+            !$OMP END ORDERED
 
       end do
       !$OMP END DO
