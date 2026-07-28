@@ -193,15 +193,7 @@ subroutine get_ome_sp(iflag_norder)
 
       real(8), allocatable :: vme_der_phase(:,:,:,:)
 
-      ! PATCH: reinstated as module-level SHARED accumulators, exactly like
-      ! the original working code -- each thread writes to its own disjoint
-      ! ibz index, so no locking/ordering is needed, and no thread ever
-      ! blocks another. At nband_ex=8 this is only ~70 MB total, so the
-      ! memory concern that originally motivated streaming per-k-point
-      ! writes does not apply here. Declared allocatable, allocated once
-      ! SERIALLY before the parallel region (NOT inside it, and NOT marked
-      ! PRIVATE -- this is deliberately shared, unlike the per-thread
-      ! scratch arrays below).
+      ! Shared accumulators, disjoint per-ibz writes -- no locking needed.
       real(8),    allocatable :: ek(:,:)
       complex*16, allocatable :: vme_ex_band(:,:,:,:)
       complex*16, allocatable :: berry_eigen_ex_band(:,:,:,:)
@@ -227,44 +219,27 @@ subroutine get_ome_sp(iflag_norder)
 
       write(*,*) '   Calculating optical matrix elements (sp): sampling BZ...'
 
-      ! PATCH: reverted from SCHEDULE(DYNAMIC) ORDERED back to a plain
-      ! PARALLEL DO with the default (effectively STATIC) schedule and NO
-      ! ordered/file-I/O inside the parallel region at all. Work per
-      ! k-point is uniform (no branching/early exit on ibz), so DYNAMIC
-      ! bought nothing here, while ORDERED forced threads to block on each
-      ! other around file writes to a network filesystem -- letting a
-      ! single slow write stall the whole 256-thread team while unbounded
-      ! numbers of already-finished-but-blocked iterations piled up. This
-      ! is very likely the actual source of the OOM kill (see seff's
-      ! 38.5% CPU efficiency -- most time was spent blocked, not computing).
-      !$OMP PARALLEL DO PRIVATE(rkx,rky,rkz,ibz,i,j,ii,jj,nj), &
+      ! PATCH: split PARALLEL / DO (STATIC, no ORDERED). Per-thread scratch
+      ! allocated once at region entry, deallocated once at region exit --
+      ! avoids re-allocating on every k-point while still keeping all file
+      ! I/O out of the parallel region entirely (that write happens once,
+      ! serially, after !$OMP END PARALLEL below).
+      !$OMP PARALLEL PRIVATE(rkx,rky,rkz,ibz,i,j,ii,jj,nj), &
       !$OMP PRIVATE(hkernel,skernel,sderkernel,hderkernel,akernel), &
       !$OMP PRIVATE(hk_ev,e,vme), &
       !$OMP PRIVATE(abc,gen_der), &
       !$OMP PRIVATE(vme_der,shift_vector,berry_eigen1,berry_eigen2,berry_eigen), &
       !$OMP PRIVATE(hk_ev_neigh,vme_neigh,vme_der_phase)
+
+      allocate(skernel(norb,norb), hkernel(norb,norb))
+      allocate(sderkernel(3,norb,norb), hderkernel(3,norb,norb))
+      allocate(akernel(3,norb,norb))
+      allocate(gen_der(3,3,norb,norb), vme_der(3,3,norb,norb))
+      allocate(hk_ev_neigh(norb,norb,7), vme_neigh(3,norb,norb,7))
+      allocate(vme_der_phase(3,3,norb,norb))
+
+      !$OMP DO SCHEDULE(STATIC)
       do ibz=1,npointstotal
-
-            ! PATCH: per-thread heap scratch allocated fresh each iteration
-            ! here rather than once at parallel-region entry, since PARALLEL
-            ! DO (combined directive) doesn't give a separate "enter region"
-            ! point to allocate once outside the loop the way the previous
-            ! PARALLEL / DO split did. This does mean an allocate/deallocate
-            ! pair per k-point per thread instead of once per thread total --
-            ! a small, bounded, repeated cost (not a leak, since each is
-            ! freed before the next iteration's allocate), and a worthwhile
-            ! trade to fully remove the ORDERED-related blocking. If this
-            ! turns out to be measurably costly, reverting to the
-            ! PARALLEL / DO split with allocation once per thread (as in the
-            ! immediately preceding version of this file) while keeping this
-            ! STATIC-no-ORDERED write strategy is the next optimization step.
-            allocate(skernel(norb,norb), hkernel(norb,norb))
-            allocate(sderkernel(3,norb,norb), hderkernel(3,norb,norb))
-            allocate(akernel(3,norb,norb))
-            allocate(gen_der(3,3,norb,norb), vme_der(3,3,norb,norb))
-            allocate(hk_ev_neigh(norb,norb,7), vme_neigh(3,norb,norb,7))
-            allocate(vme_der_phase(3,3,norb,norb))
-
             write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
             rkx=rkxvector(ibz)
             rky=rkyvector(ibz)
@@ -283,9 +258,6 @@ subroutine get_ome_sp(iflag_norder)
                   skernel,hkernel,sderkernel,hderkernel,akernel,vme_der_phase)
             end if
 
-            ! PATCH: writes straight into the shared arrays at this
-            ! thread's own disjoint ibz index -- no lock needed, exactly
-            ! as in the original working code.
             do i=1,nband_ex
                   ii=nband_index(i)
                   ek(ibz,i)=e(ii)
@@ -308,15 +280,13 @@ subroutine get_ome_sp(iflag_norder)
                         end do
                   end do
             end do
-
-            deallocate(skernel,hkernel,sderkernel,hderkernel,akernel)
-            deallocate(gen_der,vme_der,hk_ev_neigh,vme_neigh,vme_der_phase)
       end do
-      !$OMP END PARALLEL DO
+      !$OMP END DO
 
-      ! PATCH: file write reinstated as a single serial pass after the
-      ! parallel region closes -- exactly like the original working code.
-      ! No thread is ever blocked waiting on I/O during the compute phase.
+      deallocate(skernel,hkernel,sderkernel,hderkernel,akernel)
+      deallocate(gen_der,vme_der,hk_ev_neigh,vme_neigh,vme_der_phase)
+      !$OMP END PARALLEL
+
       write(*,*) '   Writing optical matrix elements (sp) into file'
       if (iflag_norder.eq.1) then
          call write_ome_sp_linear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek)
