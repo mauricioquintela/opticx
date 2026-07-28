@@ -174,7 +174,6 @@ subroutine get_ome_sp(iflag_norder)
       integer iflag_norder
       integer ibz
       integer i,j,ii,jj,nj
-      integer u_out
 
       complex*16, allocatable :: skernel(:,:), hkernel(:,:)
       complex*16, allocatable :: sderkernel(:,:,:), hderkernel(:,:,:)
@@ -194,14 +193,20 @@ subroutine get_ome_sp(iflag_norder)
 
       real(8), allocatable :: vme_der_phase(:,:,:,:)
 
-      ! PATCH: per-thread, band-mapped (nband_ex-sized) scratch used only
-      ! to hold ONE k-point's worth of output before it's written to disk
-      ! -- replaces indexing into the old full-size shared arrays.
-      real(8)    :: ek_i(nband_ex)
-      complex*16 :: vme_band(3,nband_ex,nband_ex)
-      complex*16 :: berry_band(3,nband_ex,nband_ex)
-      real(8)    :: shift_band(3,3,nband_ex,nband_ex)
-      complex*16 :: gender_band(3,3,nband_ex,nband_ex)
+      ! PATCH: reinstated as module-level SHARED accumulators, exactly like
+      ! the original working code -- each thread writes to its own disjoint
+      ! ibz index, so no locking/ordering is needed, and no thread ever
+      ! blocks another. At nband_ex=8 this is only ~70 MB total, so the
+      ! memory concern that originally motivated streaming per-k-point
+      ! writes does not apply here. Declared allocatable, allocated once
+      ! SERIALLY before the parallel region (NOT inside it, and NOT marked
+      ! PRIVATE -- this is deliberately shared, unlike the per-thread
+      ! scratch arrays below).
+      real(8),    allocatable :: ek(:,:)
+      complex*16, allocatable :: vme_ex_band(:,:,:,:)
+      complex*16, allocatable :: berry_eigen_ex_band(:,:,:,:)
+      complex*16, allocatable :: gen_der_ex_band(:,:,:,:,:)
+      real(8),    allocatable :: shift_vector_ex_band(:,:,:,:,:)
 
       real(8) :: rkx,rky,rkz
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -209,44 +214,58 @@ subroutine get_ome_sp(iflag_norder)
 
       call set_active_flags()
 
-      u_out = 10
-
-      ! PATCH: file opened and header written ONCE, serially, before the
-      ! parallel region -- exactly the header write_ome_sp_linear /
-      ! write_ome_sp_nonlinear used to do, just moved earlier so the loop
-      ! below can stream directly into the body of the same file.
-      if (iflag_norder.eq.1) then
-         open(u_out,file='ome_linear_sp_'//trim(material_name)//'.omesp')
-         write(u_out,*) iflag_norder
-      end if
-      if (iflag_norder.eq.2) then
-         open(u_out, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp', &
-              form='unformatted', access='stream', status='replace')
-         write(u_out) iflag_norder
-         write(u_out) npointstotal, nband_ex
-         write(u_out) rkxvector, rkyvector, rkzvector
-      end if
+      allocate(vme_ex_band(npointstotal,3,nband_ex,nband_ex))
+      allocate(ek(npointstotal,nband_ex))
+      allocate(berry_eigen_ex_band(npointstotal,3,nband_ex,nband_ex))
+      allocate(gen_der_ex_band(npointstotal,3,3,nband_ex,nband_ex))
+      allocate(shift_vector_ex_band(npointstotal,3,3,nband_ex,nband_ex))
+      gen_der_ex_band=0.0d0
+      shift_vector_ex_band=0.0d0
+      berry_eigen_ex_band=0.0d0
+      vme_ex_band=0.0d0
+      ek=0.0d0
 
       write(*,*) '   Calculating optical matrix elements (sp): sampling BZ...'
 
-      !$OMP PARALLEL PRIVATE(rkx,rky,rkz,ibz,i,j,ii,jj,nj), &
+      ! PATCH: reverted from SCHEDULE(DYNAMIC) ORDERED back to a plain
+      ! PARALLEL DO with the default (effectively STATIC) schedule and NO
+      ! ordered/file-I/O inside the parallel region at all. Work per
+      ! k-point is uniform (no branching/early exit on ibz), so DYNAMIC
+      ! bought nothing here, while ORDERED forced threads to block on each
+      ! other around file writes to a network filesystem -- letting a
+      ! single slow write stall the whole 256-thread team while unbounded
+      ! numbers of already-finished-but-blocked iterations piled up. This
+      ! is very likely the actual source of the OOM kill (see seff's
+      ! 38.5% CPU efficiency -- most time was spent blocked, not computing).
+      !$OMP PARALLEL DO PRIVATE(rkx,rky,rkz,ibz,i,j,ii,jj,nj), &
       !$OMP PRIVATE(hkernel,skernel,sderkernel,hderkernel,akernel), &
       !$OMP PRIVATE(hk_ev,e,vme), &
       !$OMP PRIVATE(abc,gen_der), &
       !$OMP PRIVATE(vme_der,shift_vector,berry_eigen1,berry_eigen2,berry_eigen), &
-      !$OMP PRIVATE(hk_ev_neigh,vme_neigh,vme_der_phase), &
-      !$OMP PRIVATE(ek_i,vme_band,berry_band,shift_band,gender_band)
-
-      allocate(skernel(norb,norb), hkernel(norb,norb))
-      allocate(sderkernel(3,norb,norb), hderkernel(3,norb,norb))
-      allocate(akernel(3,norb,norb))
-
-      allocate(gen_der(3,3,norb,norb), vme_der(3,3,norb,norb))
-      allocate(hk_ev_neigh(norb,norb,7), vme_neigh(3,norb,norb,7))
-      allocate(vme_der_phase(3,3,norb,norb))
-
-      !$OMP DO SCHEDULE(DYNAMIC) ORDERED
+      !$OMP PRIVATE(hk_ev_neigh,vme_neigh,vme_der_phase)
       do ibz=1,npointstotal
+
+            ! PATCH: per-thread heap scratch allocated fresh each iteration
+            ! here rather than once at parallel-region entry, since PARALLEL
+            ! DO (combined directive) doesn't give a separate "enter region"
+            ! point to allocate once outside the loop the way the previous
+            ! PARALLEL / DO split did. This does mean an allocate/deallocate
+            ! pair per k-point per thread instead of once per thread total --
+            ! a small, bounded, repeated cost (not a leak, since each is
+            ! freed before the next iteration's allocate), and a worthwhile
+            ! trade to fully remove the ORDERED-related blocking. If this
+            ! turns out to be measurably costly, reverting to the
+            ! PARALLEL / DO split with allocation once per thread (as in the
+            ! immediately preceding version of this file) while keeping this
+            ! STATIC-no-ORDERED write strategy is the next optimization step.
+            allocate(skernel(norb,norb), hkernel(norb,norb))
+            allocate(sderkernel(3,norb,norb), hderkernel(3,norb,norb))
+            allocate(akernel(3,norb,norb))
+            allocate(gen_der(3,3,norb,norb), vme_der(3,3,norb,norb))
+            allocate(hk_ev_neigh(norb,norb,7), vme_neigh(3,norb,norb,7))
+            allocate(vme_der_phase(3,3,norb,norb))
+
+            write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
             rkx=rkxvector(ibz)
             rky=rkyvector(ibz)
             rkz=rkzvector(ibz)
@@ -264,71 +283,51 @@ subroutine get_ome_sp(iflag_norder)
                   skernel,hkernel,sderkernel,hderkernel,akernel,vme_der_phase)
             end if
 
-            ! Band-map this k-point's results into the small per-thread buffers
-            ! declared above, exactly as before, just no longer writing into a
-            ! shared full-size array indexed by ibz.
+            ! PATCH: writes straight into the shared arrays at this
+            ! thread's own disjoint ibz index -- no lock needed, exactly
+            ! as in the original working code.
             do i=1,nband_ex
                   ii=nband_index(i)
-                  ek_i(i)=e(ii)
+                  ek(ibz,i)=e(ii)
                   do nj=1,3
                         do j=1,nband_ex
                               jj=nband_index(j)
-                              vme_band(nj,i,j)=vme(nj,ii,jj)
+                              vme_ex_band(ibz,nj,i,j)=vme(nj,ii,jj)
 
                               if (iflag_norder.eq.2) then
-                                    shift_band(nj,1,i,j)=shift_vector(nj,1,ii,jj)
-                                    shift_band(nj,2,i,j)=shift_vector(nj,2,ii,jj)
-                                    shift_band(nj,3,i,j)=shift_vector(nj,3,ii,jj)
+                                    shift_vector_ex_band(ibz,nj,1,i,j)=shift_vector(nj,1,ii,jj)
+                                    shift_vector_ex_band(ibz,nj,2,i,j)=shift_vector(nj,2,ii,jj)
+                                    shift_vector_ex_band(ibz,nj,3,i,j)=shift_vector(nj,3,ii,jj)
 
-                                    gender_band(nj,1,i,j)=gen_der(nj,1,ii,jj)
-                                    gender_band(nj,2,i,j)=gen_der(nj,2,ii,jj)
-                                    gender_band(nj,3,i,j)=gen_der(nj,3,ii,jj)
+                                    gen_der_ex_band(ibz,nj,1,i,j)=gen_der(nj,1,ii,jj)
+                                    gen_der_ex_band(ibz,nj,2,i,j)=gen_der(nj,2,ii,jj)
+                                    gen_der_ex_band(ibz,nj,3,i,j)=gen_der(nj,3,ii,jj)
 
-                                    berry_band(nj,i,j)=berry_eigen(nj,ii,jj)
+                                    berry_eigen_ex_band(ibz,nj,i,j)=berry_eigen(nj,ii,jj)
                               end if
                         end do
                   end do
             end do
 
-            ! PATCH: actual disk write happens here, inside an ORDERED region.
-            ! Threads compute k-points in whatever order SCHEDULE(DYNAMIC) hands
-            ! them out, but ORDERED forces entry into this block to happen in
-            ! strict ibz=1,2,3,... sequence -- matching the on-disk format that
-            ! read_ome_sp_linear/read_ome_sp_nonlinear expect (they read
-            ! sequentially with no ibz index stored per-record). This is the
-            ! same technique already used in print_sigma_second_ex and the
-            ! k-resolved write in get_ome_ex.
-            !$OMP ORDERED
-            write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
-            
-            if (iflag_norder.eq.1) then
-                  write(u_out,*) rkx,rky,rkz,(ek_i(j),j=1,nband_ex)
-                  do i=1,nband_ex
-                        do j=1,nband_ex
-                        write(u_out,*) rkx,rky,rkz, &
-                              (realpart(vme_band(nj,i,j)),aimag(vme_band(nj,i,j)), nj=1,3)
-                        end do
-                  end do
-            end if
-            if (iflag_norder.eq.2) then
-                  write(u_out) ek_i(:)
-                  write(u_out) vme_band(:,:,:)
-                  write(u_out) berry_band(:,:,:)
-                  write(u_out) shift_band(:,:,:,:)
-                  write(u_out) gender_band(:,:,:,:)
-            end if
-            !$OMP END ORDERED
-
+            deallocate(skernel,hkernel,sderkernel,hderkernel,akernel)
+            deallocate(gen_der,vme_der,hk_ev_neigh,vme_neigh,vme_der_phase)
       end do
-      !$OMP END DO
+      !$OMP END PARALLEL DO
 
-      deallocate(skernel,hkernel,sderkernel,hderkernel,akernel)
-      deallocate(gen_der,vme_der,hk_ev_neigh,vme_neigh,vme_der_phase)
-      !$OMP END PARALLEL
-
-      close(u_out)
-
+      ! PATCH: file write reinstated as a single serial pass after the
+      ! parallel region closes -- exactly like the original working code.
+      ! No thread is ever blocked waiting on I/O during the compute phase.
+      write(*,*) '   Writing optical matrix elements (sp) into file'
+      if (iflag_norder.eq.1) then
+         call write_ome_sp_linear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek)
+      end if
+      if (iflag_norder.eq.2) then
+         call write_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek, &
+            gen_der_ex_band,shift_vector_ex_band,berry_eigen_ex_band)
+      end if
       write(*,*) '   Optical matrix elements (sp) have been written in file'
+
+      deallocate(vme_ex_band,ek,berry_eigen_ex_band,gen_der_ex_band,shift_vector_ex_band)
 end subroutine get_ome_sp
 
 
