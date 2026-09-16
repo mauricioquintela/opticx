@@ -12,6 +12,8 @@ module ome_ex
   use exciton_envelopes, &
     only: fk_ex_der, get_fk_ex_der_k
   implicit none
+  logical, save :: inter_terms_ready = .false.
+!   public :: inter_terms_ready
 
   complex(8), allocatable :: xme_ex(:,:)
   complex(8), allocatable :: vme_ex(:,:)
@@ -32,7 +34,11 @@ contains
   subroutine get_ome_ex(iflag_norder)
     use omp_lib
     implicit none
+    
     integer, intent(in) :: iflag_norder
+    
+    integer :: kmoment
+
 
     integer :: ibz, nn, nnp, nj, nbasis
     integer :: u_exk
@@ -75,6 +81,9 @@ contains
     complex(8), allocatable :: out_q(:,:)
 
     write(*,*) '6. Entering ome_ex'
+    
+    inter_terms_ready = .false.   ! ADD near the top
+    
     ! PATCH: do_write_exk is now driven by the input-file flag
     ! (Write_ex_kresolved) rather than being hardcoded. Kept ANDed with
     ! iflag_norder==1 since k-resolved linear output only makes sense when
@@ -172,6 +181,11 @@ contains
     ! combined once at the end (same pattern as sigma_second_sp's
     ! get_sigma_shift_sp). The k-resolved file write is kept in k-order via
     ! schedule(dynamic) + ordered, same pattern as print_sigma_second_ex.
+    
+    
+    ! Add a shared/threadprivate moment counter before the parallel region
+    kmoment = -1
+    
     !$omp parallel &
     !$omp   private(ibz, vme_ex_t, xme_ex_t, vme_ex_k_t, &
     !$omp           qme_ex_inter1_t, qme_ex_inter2_t, &
@@ -179,7 +193,8 @@ contains
     !$omp           vme_ex_inter1_t, vme_ex_inter2_t, &
     !$omp           i_ex_table, F_cv, FcvH, D_c, A_c, &
     !$omp           B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv, &
-    !$omp           out_v, out_y, out_q)
+    !$omp           out_v, out_y, out_q)&
+    !$omp   shared(kmoment)
 
     allocate(vme_ex_t(3, norb_ex_cut)); vme_ex_t = (0.0d0, 0.0d0)
     allocate(xme_ex_t(3, norb_ex_cut)); xme_ex_t = (0.0d0, 0.0d0)
@@ -212,11 +227,13 @@ contains
       allocate(out_y(norb_ex_cut, norb_ex_cut))
       allocate(out_q(norb_ex_cut, norb_ex_cut))
     end if
-
+    
+    
     !$omp do schedule(dynamic) ordered
     do ibz = 1, npointstotal
       write(*,*) '   OME (ex): k-point', ibz, '/', npointstotal
-
+!       call percentage_index(ibz, npointstotal, kmoment)   ! REPLACES the per-ibz write(*,*)
+      
       if (iflag_norder == 1 .or. iflag_norder == 2) &
         call get_ome_gs_ex_sum_k(ibz, vme_ex_band, xme_ex_band, vme_ex_t, xme_ex_t)
 
@@ -279,6 +296,7 @@ contains
       xme_ex_inter = yme_ex_inter  + qme_ex_inter
       vme_ex_inter = vme_ex_inter1 + vme_ex_inter2
       deallocate(fk_ex_der)
+      inter_terms_ready = .true.   ! ADD here
     end if
 
     write(*,*) '   Optical matrix elements (ex) have been evaluated'
@@ -735,6 +753,11 @@ contains
 
    close(10)
   end subroutine read_ome_sp_nonlinear
+  
+  !!!!!
+  
+  ! DO NOT RENABLE WITHOUT UPDATING THE WRITE ROUTINE AS WELL
+  
   
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !   subroutine read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, &

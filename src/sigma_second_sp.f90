@@ -235,9 +235,9 @@ end subroutine get_sigma_shift_sp
           delta_nnp = 1.0d0/pi * aimag(1.0d0 / (wp(iw) - e_nband(nn) + &
             e_nband(nnp) - complex(0.0d0, eta2)))
         else
-          ! Default to Gaussian
-          delta_nnp = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * &
-            exp(-0.5d0/(eta2**2) * (wp(iw) - e_nband(nn) + e_nband(nnp))**2)
+          ! Default to lorentzian
+          delta_nnp = 1.0d0/pi * aimag(1.0d0 / (wp(iw) - e_nband(nn) + &
+            e_nband(nnp) - complex(0.0d0, eta2)))
         end if
  
         do nj = 1, 3

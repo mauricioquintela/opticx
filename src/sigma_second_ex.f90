@@ -1,18 +1,15 @@
 module sigma_second_ex
   use constants_math
-	use parser_input_file, &
-	only:e1,e2,eta,nw,response_text,broadening_type_text
+  use parser_input_file, &
+    only:e1,e2,eta,nw,response_text,broadening_type_text
   use parser_wannier90_tb, &
-  only:material_name
+    only:material_name
   use parser_optics_xatu_dim, &
-  only:npointstotal,vcell, &
-  norb_ex_cut,nv_ex,nc_ex,nband_ex, &
-  e_ex,fk_ex
+    only:npointstotal,vcell,norb_ex_cut,nv_ex,nc_ex,nband_ex,e_ex,fk_ex
   use ome_ex, &
-  only:e_ex,xme_ex,vme_ex, &
-  xme_ex_inter,vme_ex_inter
+    only:e_ex,xme_ex,vme_ex,xme_ex_inter,vme_ex_inter,inter_terms_ready
   use sigma_second_sp, &
-  only:initialize_sigma_second_arrays
+    only:initialize_sigma_second_arrays
   implicit none
 
   contains
@@ -47,10 +44,16 @@ module sigma_second_ex
     complex*16 :: sigma_w_ex
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
     !initialize conductivity arrays
+    
     call initialize_sigma_second_arrays(nw,wp,eta2,sigma_w_ex)
 	write(*,*) '    Evaluating shift conductivity (ex)...'
-
+    
     !call the subroutine to compute the shift conductivity
+    if (.not. inter_terms_ready) then
+      write(*,*) 'ERROR (sigma_second_ex): xme_ex_inter/vme_ex_inter not '// &
+                'populated — get_ome_ex must be called with iflag_norder=2 first.'
+      stop 1
+    end if
     call get_shift_intens_ex(wp,eta2,sigma_w_ex)
 	!print shift conductivity (ex)
 	call print_sigma_second_ex(nw,wp,sigma_w_ex)
@@ -125,77 +128,153 @@ module sigma_second_ex
 ! 
 !   end subroutine get_shift_intens_ex
 
+!   subroutine get_shift_intens_ex_ref(wp, eta2, sigma_w_ex)
+!     use omp_lib
+!     implicit none
+! 
+!     real(8),    intent(in)    :: wp(nw), eta2
+!     complex(8), intent(inout) :: sigma_w_ex(3,3,3,nw)
+! 
+!     integer     :: iw, nn, nnp, nj, njp, njpp
+!     integer     :: mode   ! 1 = gaussian, 2 = lorentzian
+!     real(8)     :: omegap, omegaq, omega2
+!     complex(8)  :: s1, s2, s3
+!     complex(8)  :: shift_kernel_ex1
+!     complex(8), allocatable :: sigma_w_ex_t(:,:,:,:)
+! 
+!     ! PATCH: broadening-mode string comparison hoisted OUT of the hot path.
+!     ! Previously re-evaluated (trim + string compare) on every one of the
+!     ! nw*norb_ex_cut^2*27 calls to get_shift_kernel_ex; now done exactly once.
+!     if (trim(broadening_type_text) == 'gaussian') then
+!       mode = 1
+!     else
+!       mode = 2   ! lorentzian, also the default fallback
+!     end if
+! 
+!     sigma_w_ex = (0.0d0, 0.0d0)
+! 
+!     !$omp parallel default(none) &
+!     !$omp   shared(mode, eta2, wp, nw, norb_ex_cut, npointstotal, vcell, sigma_w_ex) &
+!     !$omp   private(nn, nj, njp, njpp, nnp, iw, omegap, omegaq, omega2, &
+!     !$omp           s1, s2, s3, shift_kernel_ex1, sigma_w_ex_t)
+! 
+!     allocate(sigma_w_ex_t(3,3,3,nw))
+!     sigma_w_ex_t = (0.0d0, 0.0d0)
+! 
+!     !$omp do schedule(dynamic)
+!     do nn = 1, norb_ex_cut
+!       do nj = 1, 3
+!         do njp = 1, 3
+!           do njpp = 1, 3
+!             do nnp = 1, norb_ex_cut
+! 
+!               ! PATCH: frequency-independent physics computed ONCE per
+!               ! (nj,njp,njpp,nn,nnp) instead of nw times.
+!               call get_shift_kernel_ex_static(mode, nj, njp, njpp, nn, nnp, s1, s2, s3)
+! 
+!               do iw = 1, nw
+!                 omegap = wp(iw)
+!                 omegaq = -wp(iw)
+!                 omega2 = 0.0d0
+! 
+!                 call get_shift_kernel_ex_freq(mode, eta2, omegap, omegaq, omega2, &
+!                                               nn, nnp, s1, s2, s3, shift_kernel_ex1)
+! 
+!                 sigma_w_ex_t(nj,njp,njpp,iw) = sigma_w_ex_t(nj,njp,njpp,iw) &
+!                   + 1.0d0 / (dble(npointstotal) * vcell) * shift_kernel_ex1
+!               end do
+! 
+!             end do
+!           end do
+!         end do
+!       end do
+!     end do
+!     !$omp end do
+! 
+!     !$omp critical
+!       sigma_w_ex = sigma_w_ex + sigma_w_ex_t
+!     !$omp end critical
+! 
+!     deallocate(sigma_w_ex_t)
+!     !$omp end parallel
+! 
+!   end subroutine get_shift_intens_ex_ref
+  
   subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
-    use omp_lib
-    implicit none
+  use omp_lib
+  implicit none
 
-    real(8),    intent(in)    :: wp(nw), eta2
-    complex(8), intent(inout) :: sigma_w_ex(3,3,3,nw)
+  real(8),    intent(in)    :: wp(nw), eta2
+  complex(8), intent(inout) :: sigma_w_ex(3,3,3,nw)
 
-    integer     :: iw, nn, nnp, nj, njp, njpp
-    integer     :: mode   ! 1 = gaussian, 2 = lorentzian
-    real(8)     :: omegap, omegaq, omega2
-    complex(8)  :: s1, s2, s3
-    complex(8)  :: shift_kernel_ex1
-    complex(8), allocatable :: sigma_w_ex_t(:,:,:,:)
+  integer     :: nn, nnp, nj, njp, njpp
+  integer     :: mode   ! 1 = gaussian, 2 = lorentzian
+  complex(8)  :: s1, s2, s3
+  complex(8), allocatable :: sigma_w_ex_t(:,:,:,:)
+  complex(8), allocatable :: d1_arr(:), d2_arr(:), d3_arr(:), d4_arr(:)
 
-    ! PATCH: broadening-mode string comparison hoisted OUT of the hot path.
-    ! Previously re-evaluated (trim + string compare) on every one of the
-    ! nw*norb_ex_cut^2*27 calls to get_shift_kernel_ex; now done exactly once.
-    if (trim(broadening_type_text) == 'lorentzian') then
-      mode = 2
-    else
-      mode = 1   ! gaussian, also the default fallback
-    end if
+  if (trim(broadening_type_text) == 'lorentzian') then
+    mode = 2
+  else
+    mode = 1   ! gaussian, also the default fallback
+  end if
 
-    sigma_w_ex = (0.0d0, 0.0d0)
+  sigma_w_ex = (0.0d0, 0.0d0)
 
-    !$omp parallel default(none) &
-    !$omp   shared(mode, eta2, wp, nw, norb_ex_cut, npointstotal, vcell, sigma_w_ex) &
-    !$omp   private(nn, nj, njp, njpp, nnp, iw, omegap, omegaq, omega2, &
-    !$omp           s1, s2, s3, shift_kernel_ex1, sigma_w_ex_t)
+  !$omp parallel default(none) &
+  !$omp   shared(mode, eta2, wp, nw, norb_ex_cut, npointstotal, vcell, sigma_w_ex) &
+  !$omp   private(nn, nnp, nj, njp, njpp, s1, s2, s3, &
+  !$omp           sigma_w_ex_t, d1_arr, d2_arr, d3_arr, d4_arr)
 
-    allocate(sigma_w_ex_t(3,3,3,nw))
-    sigma_w_ex_t = (0.0d0, 0.0d0)
+  allocate(sigma_w_ex_t(3,3,3,nw))
+  sigma_w_ex_t = (0.0d0, 0.0d0)
+  allocate(d1_arr(nw), d2_arr(nw), d3_arr(nw), d4_arr(nw))
 
-    !$omp do schedule(dynamic)
-    do nn = 1, norb_ex_cut
+  !$omp do schedule(static)
+  do nn = 1, norb_ex_cut
+    do nnp = 1, norb_ex_cut
+
+      ! d1..d4 depend only on (nn,nnp) and the frequency grid wp(:) —
+      ! NOT on (nj,njp,njpp). Computed once here per (nn,nnp) pair,
+      ! across the whole frequency axis, instead of 27 times (once per
+      ! Cartesian index triple) inside the loop below.
+      call get_shift_kernel_ex_dfactors(mode, eta2, wp, nn, nnp, &
+                                         d1_arr, d2_arr, d3_arr, d4_arr)
+
       do nj = 1, 3
         do njp = 1, 3
           do njpp = 1, 3
-            do nnp = 1, norb_ex_cut
 
-              ! PATCH: frequency-independent physics computed ONCE per
-              ! (nj,njp,njpp,nn,nnp) instead of nw times.
-              call get_shift_kernel_ex_static(mode, nj, njp, njpp, nn, nnp, s1, s2, s3)
+            call get_shift_kernel_ex_static(mode, nj, njp, njpp, nn, nnp, s1, s2, s3)
 
-              do iw = 1, nw
-                omegap = wp(iw)
-                omegaq = -wp(iw)
-                omega2 = 0.0d0
+            if (mode == 1) then
+              sigma_w_ex_t(nj,njp,njpp,:) = sigma_w_ex_t(nj,njp,njpp,:) &
+                - ( s1*(-cmplx(0.0d0,1.0d0,8)*pi*d1_arr(:)) &
+                  + s2*(-cmplx(0.0d0,1.0d0,8)*pi*d2_arr(:)) &
+                  + s3*(-pi**2*d3_arr(:)*d4_arr(:)) ) &
+                  / (dble(npointstotal) * vcell)
+            else
+              sigma_w_ex_t(nj,njp,njpp,:) = sigma_w_ex_t(nj,njp,njpp,:) &
+                - ( s1*d1_arr(:) + s2*d2_arr(:) + s3*d3_arr(:) ) &
+                  / (dble(npointstotal) * vcell)
+            end if
 
-                call get_shift_kernel_ex_freq(mode, eta2, omegap, omegaq, omega2, &
-                                              nn, nnp, s1, s2, s3, shift_kernel_ex1)
-
-                sigma_w_ex_t(nj,njp,njpp,iw) = sigma_w_ex_t(nj,njp,njpp,iw) &
-                  + 1.0d0 / (dble(npointstotal) * vcell) * shift_kernel_ex1
-              end do
-
-            end do
           end do
         end do
       end do
+
     end do
-    !$omp end do
+  end do
+  !$omp end do
 
-    !$omp critical
-      sigma_w_ex = sigma_w_ex + sigma_w_ex_t
-    !$omp end critical
+  !$omp critical
+    sigma_w_ex = sigma_w_ex + sigma_w_ex_t
+  !$omp end critical
 
-    deallocate(sigma_w_ex_t)
-    !$omp end parallel
+  deallocate(sigma_w_ex_t, d1_arr, d2_arr, d3_arr, d4_arr)
+  !$omp end parallel
 
-  end subroutine get_shift_intens_ex
+end subroutine get_shift_intens_ex
   
   ! Frequency-independent part: s1, s2, s3 only.
   subroutine get_shift_kernel_ex_static(mode, nj, njp, njpp, nn, nnp, s1, s2, s3)
@@ -207,13 +286,16 @@ module sigma_second_ex
     nj1 = nj; nj2 = njp; nj3 = njpp
 
     if (mode == 1) then   ! gaussian
-      s1 = -vme_ex(nj1,nn)/e_ex(nn) * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
-      s2 =  conjg(vme_ex(nj1,nn))/e_ex(nn) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)
-      s3 = -xme_ex(nj1,nn) * vme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
+      s1 = -vme_ex(nj1,nn)/e_ex(nn) * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))         ! a→V_0N, b→R_NN' — matches term1
+      s2 =  conjg(vme_ex(nj1,nn))/e_ex(nn) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)  ! matches term2
+!       s3 = -xme_ex(nj1,nn) * vme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))                ! a→R_0N, b→V_NN'  ← WRONG
+      s3 = -xme_ex(nj2,nn) * vme_ex_inter(nj1,nn,nnp) * conjg(xme_ex(nj3,nnp))
+      
     else                    ! lorentzian
-      s1 = vme_ex(nj1,nn) * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
-      s2 = conjg(vme_ex(nj1,nn)) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)
-      s3 = -xme_ex(nj1,nn) * vme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
+      s1 = vme_ex(nj1,nn) * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))         ! a→V_0N, b→R_NN' — matches term1
+      s2 = conjg(vme_ex(nj1,nn)) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)  ! matches term2
+!       s3 = -xme_ex(nj1,nn) * vme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))      ! a→R_0N, b→V_NN'  ← WRONG
+      s3 = -xme_ex(nj2,nn) * vme_ex_inter(nj1,nn,nnp) * conjg(xme_ex(nj3,nnp))
       ! PATCH: the lorentzian mode's real-part transform (cmplx(aimag(s),0))
       ! is also frequency-independent, so it's folded in here rather than
       ! redone inside the iw loop.
@@ -222,6 +304,27 @@ module sigma_second_ex
       s3 = cmplx(aimag(s3), 0.0d0, 8)
     end if
   end subroutine get_shift_kernel_ex_static
+  
+  subroutine get_shift_kernel_ex_dfactors(mode, eta2, wp, nn, nnp, d1, d2, d3, d4)
+  implicit none
+  integer,    intent(in)  :: mode, nn, nnp
+  real(8),    intent(in)  :: eta2, wp(nw)
+  complex(8), intent(out) :: d1(nw), d2(nw), d3(nw), d4(nw)
+
+  if (mode == 1) then   ! gaussian
+    ! omegap = wp(:), omegaq = -wp(:), omega2 = 0.0d0  (as in the original)
+    d1(:) = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(-wp(:)-e_ex(nnp))**2)
+    d2(:) = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(-wp(:)+e_ex(nnp))**2)
+    d3(:) = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(-wp(:)+e_ex(nn))**2)
+    d4(:) = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(wp(:)-e_ex(nnp))**2)
+  else                    ! lorentzian
+    d1(:) = 1.0d0 / ( (-e_ex(nn)+cmplx(0.0d0,eta2,8)) * (-wp(:)-e_ex(nnp)+cmplx(0.0d0,eta2,8)) )
+    d2(:) = 1.0d0 / ( ( e_ex(nn)+cmplx(0.0d0,eta2,8)) * (-wp(:)+e_ex(nnp)+cmplx(0.0d0,eta2,8)) )
+    d3(:) = 1.0d0 / ( ( e_ex(nn)-wp(:)+cmplx(0.0d0,eta2,8)) * ( wp(:)-e_ex(nnp)+cmplx(0.0d0,eta2,8)) )
+    d4(:) = (0.0d0, 0.0d0)   ! unused in lorentzian mode; present only so the interface is uniform
+  end if
+
+end subroutine get_shift_kernel_ex_dfactors
   
   ! Frequency-dependent part: d1..d4 and their combination with s1,s2,s3.
 subroutine get_shift_kernel_ex_freq(mode, eta2, omegap, omegaq, omega2, &
@@ -248,9 +351,13 @@ subroutine get_shift_kernel_ex_freq(mode, eta2, omegap, omegaq, omega2, &
     d2 = 1.0d0 / ((omega2+e_ex(nn) +cmplx(0.0d0,eta2,8)) * (omegaq+e_ex(nnp)+cmplx(0.0d0,eta2,8)))
     ! d3/aux3 intentionally not computed: same as the original, aux3 was
     ! excluded from the final sum (`shift_kernel_ex=-(aux1+aux2)`).
+    ! now computed
+    d3 = 1.0d0 / ((e_ex(nn)-omegap +cmplx(0.0d0,eta2,8)) * (omegap-e_ex(nnp)+cmplx(0.0d0,eta2,8)))
+    
     aux1 = s1 * d1
     aux2 = s2 * d2
-    shift_kernel_ex = -(aux1+aux2)
+    aux3 = s3 * d3                                                                                    ! <-- added
+    shift_kernel_ex = -(aux1+aux2+aux3)
   end if
 
 end subroutine get_shift_kernel_ex_freq

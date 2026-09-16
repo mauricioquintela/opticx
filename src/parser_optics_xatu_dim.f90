@@ -153,8 +153,9 @@ end subroutine get_ex_index_first
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 subroutine get_exciton_dim()
   implicit none
-  dimension nband_index_aux1(1000)
-  dimension nband_index_aux2(1000)
+  integer, parameter :: max_scan = 1000
+  dimension nband_index_aux1(max_scan)
+  dimension nband_index_aux2(max_scan)
 
   integer :: nband_ex_aux
   integer :: nband_index_aux1,nband_index_aux2
@@ -175,8 +176,8 @@ subroutine get_exciton_dim()
   file2open=trim(xatu_states_filepath_in)
   open(10,file=file2open)
   read(10,*) 
-  do i=1,500
-    read(10,*) aux1,aux1,aux1,nband_index_aux1(i) 
+  do i=1,max_scan/2
+    read(10,*) aux1,aux1,aux1,nband_index_aux1(i)
     if (i.gt.1) then
       do j=1,i-1
         if (nband_index_aux1(i).eq.nband_index_aux1(j)) then
@@ -186,8 +187,10 @@ subroutine get_exciton_dim()
       end do
     end if
   end do
+  write(*,*) 'ERROR (get_exciton_dim): no repeated valence-band index found within ', &
+            max_scan/2, ' lines.'
+  stop 1
   128   continue
-  close(10)
 
   !save number of conduction bands
   open(10,file=file2open)
@@ -199,15 +202,19 @@ subroutine get_exciton_dim()
         read(10,*)
       end do
     end if
+    
     if (i.gt.1) then
       do j=1,i-1
         if (nband_index_aux2(i).eq.nband_index_aux2(j)) then
-          nband_ex_aux2=(i-1)
+          nband_ex_aux2=i-1
           goto 129
         end if
       end do
     end if
   end do
+  write(*,*) 'ERROR (get_exciton_dim): no repeated conudction-band index found within ', &
+            max_scan/2, ' lines.'
+  stop 1
   129   continue
   close(10)	 
 

@@ -11,8 +11,8 @@
 # Compiler and flags
 # -----------------------------------------------------------------
 FC     = gfortran
-#FFLAGS = -g -fcheck=all -Wall -O0
-FFLAGS = -O2
+FFLAGS = -fopt-info-vec -g -fcheck=all -O3
+#FFLAGS = -O2-Wall  -g -fcheck=all 
 
 # -----------------------------------------------------------------
 # Optional: use MKL  
@@ -116,7 +116,7 @@ $(BUILDDIR)/ome_ex.o: \
 	$(BUILDDIR)/exciton_envelopes.o 
 
 $(BUILDDIR)/ome.o: \
-    $(BUILDDIR)/parser_input_file.o \
+	$(BUILDDIR)/parser_input_file.o \
 	$(BUILDDIR)/ome_sp.o \
 	$(BUILDDIR)/ome_ex.o
 
@@ -144,10 +144,30 @@ $(BUILDDIR)/sigma_second_sp.o: \
 
 $(BUILDDIR)/sigma_second_ex.o: \
 	$(BUILDDIR)/constants_math.o \
-    $(BUILDDIR)/ome_ex.o \
+	$(BUILDDIR)/ome_ex.o \
 	$(BUILDDIR)/sigma_second_sp.o 
+
+# -----------------------------------------------------------------
+# Test: shift-kernel equivalence check (fast array path vs. reference
+# scalar path). Reuses every module already built for the main target.
+# -----------------------------------------------------------------
+TESTDIR     = tests
+SRC_TEST    = $(TESTDIR)/test_shift_kernel_equivalence.f90
+OBJ_TEST    = $(BINDIR)/test_shift_kernel_equivalence.o
+TARGET_TEST = $(BINDIR)/test_shift_kernel_equivalence
+
+test: $(TARGET_TEST)
+	rm -f $(OBJ_TEST)
+
+$(TARGET_TEST): $(OBJ_MODULES) $(OBJ_TEST)
+	$(FC) $(FFLAGS) $(OBJ_MODULES) $(OBJ_TEST) -o $(TARGET_TEST) $(LIBS)
+
+$(OBJ_TEST): $(SRC_TEST) | $(BINDIR) $(BUILDDIR)
+	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
+
+
 # -----------------------------------------------------------------
 # Clean
 # -----------------------------------------------------------------
 clean:
-	rm -f $(BUILDDIR)/*.o $(BUILDDIR)/*.mod $(BINDIR)/opticx.o $(TARGET)
+	rm -f $(BUILDDIR)/*.o $(BUILDDIR)/*.mod $(BINDIR)/opticx.o $(TARGET) $(BINDIR)/test_shift_kernel_equivalence.o $(TARGET_TEST)

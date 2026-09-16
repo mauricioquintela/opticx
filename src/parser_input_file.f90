@@ -94,7 +94,8 @@ module parser_input_file
       exciton_found = .false.
       write_exk_found = .false.
       ! default broadening
-      broadening_type_text = 'gaussian'
+      !broadening_type_text = 'gaussian'
+      broadening_type_text = 'lorentzian'
       iflag_write_exk_text = 'false'
       
       call get_command_argument(1,filename_input)
