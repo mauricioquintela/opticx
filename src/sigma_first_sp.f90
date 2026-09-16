@@ -256,8 +256,10 @@ module sigma_first_sp
             delta_nnp = 1.0d0/pi*aimag(1.0d0/(-wp(iw)+e(nn)-e(nnp)+&
               complex(0.0d0,eta1)))
           else
-            delta_nnp = -1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*&
-              exp(-0.5d0/(eta1**2)*(wp(iw)-e(nn)+e(nnp))**2)
+            delta_nnp = 1.0d0/pi*aimag(1.0d0/(-wp(iw)+e(nn)-e(nnp)+&
+              complex(0.0d0,eta1)))
+!             delta_nnp = -1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*&
+!               exp(-0.5d0/(eta1**2)*(wp(iw)-e(nn)+e(nnp))**2)
           end if
 
           do nj=1,3

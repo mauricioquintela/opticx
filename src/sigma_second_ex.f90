@@ -213,10 +213,10 @@ module sigma_second_ex
   complex(8), allocatable :: sigma_w_ex_t(:,:,:,:)
   complex(8), allocatable :: d1_arr(:), d2_arr(:), d3_arr(:), d4_arr(:)
 
-  if (trim(broadening_type_text) == 'lorentzian') then
-    mode = 2
+  if (trim(broadening_type_text) == 'gaussian') then
+    mode = 1
   else
-    mode = 1   ! gaussian, also the default fallback
+    mode = 2   ! lorentzian, also the default fallback
   end if
 
   sigma_w_ex = (0.0d0, 0.0d0)

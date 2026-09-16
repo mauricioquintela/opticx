@@ -119,7 +119,8 @@ module sigma_first_ex
                 
             else
               !delta_n_ex = pi*1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
-              delta_n_ex = 1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
+!              delta_n_ex = 1.0d0/eta1*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta1**2)*(wp(iw)-e_ex(nn))**2)
+              delta_n_ex = 1.0d0/pi*aimag(1.0d0/(wp(iw)-e_ex(nn)-complex(0.0d0,eta1)))
             end if
             
             !sigma_w

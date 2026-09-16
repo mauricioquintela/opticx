@@ -137,7 +137,7 @@ subroutine get_ome_sp(iflag_norder)
       allocate(akernel(norb,norb,3))
       allocate(gen_der(norb,norb,3,3), vme_der(norb,norb,3,3))
       allocate(gd1(norb,norb,3,3), gd2(norb,norb,3,3), gd3(norb,norb,3,3))
-      allocate(hk_ev_neigh(norb,norb,7), vme_neigh(3,norb,norb,7))
+      allocate(hk_ev_neigh(norb,norb,7), vme_neigh(norb,norb,3,7))
       allocate(vme_der_phase(norb,norb,3,3))
       allocate(M1(norb,norb), T1(norb,norb))                    ! NEW
 
