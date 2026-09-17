@@ -190,11 +190,13 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
 
   if (mode == 1) then
     allocate(gauss1(norb_ex_cut,nw_chunk), gauss2(norb_ex_cut,nw_chunk))
-    allocate(gauss3(norb_ex_cut,nw_chunk), gauss4(norb_ex_cut,nw_chunk))
+!     allocate(gauss3(norb_ex_cut,nw_chunk), gauss4(norb_ex_cut,nw_chunk))
+    allocate(gauss4(norb_ex_cut,nw_chunk))   ! gauss3 removed
   else
     allocate(Afac1(norb_ex_cut), Afac2(norb_ex_cut))
     allocate(Bfac1(norb_ex_cut,nw_chunk), Bfac2(norb_ex_cut,nw_chunk))
-    allocate(Cfac3(norb_ex_cut,nw_chunk), Dfac3(norb_ex_cut,nw_chunk))
+    !allocate(Cfac3(norb_ex_cut,nw_chunk), Dfac3(norb_ex_cut,nw_chunk))
+    allocate(Dfac3(norb_ex_cut,nw_chunk))
     Afac1(:) = 1.0d0/(-e_ex(:)+cmplx(0.0d0,eta2,8))
     Afac2(:) = 1.0d0/( e_ex(:)+cmplx(0.0d0,eta2,8))
   end if
@@ -213,7 +215,7 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
             exp(-0.5d0/(eta2**2)*(-wp(iw0:iw1)-e_ex(nn))**2)
         gauss2(nn,1:nw_this) = 1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)* &
             exp(-0.5d0/(eta2**2)*(-wp(iw0:iw1)+e_ex(nn))**2)
-        gauss3(nn,1:nw_this) = gauss2(nn,1:nw_this)
+        !gauss3(nn,1:nw_this) = gauss2(nn,1:nw_this)
         gauss4(nn,1:nw_this) = 1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)* &
             exp(-0.5d0/(eta2**2)*( wp(iw0:iw1)-e_ex(nn))**2)
       end do
@@ -222,7 +224,7 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
         Bfac1(nn,1:nw_this) = 1.0d0/(-wp(iw0:iw1)-e_ex(nn)+cmplx(0.0d0,eta2,8))
         Bfac2(nn,1:nw_this) = 1.0d0/(-wp(iw0:iw1)+e_ex(nn)+cmplx(0.0d0,eta2,8))
         Dfac3(nn,1:nw_this) = 1.0d0/( wp(iw0:iw1)-e_ex(nn)+cmplx(0.0d0,eta2,8))
-        Cfac3(nn,1:nw_this) = 1.0d0/( e_ex(nn)-wp(iw0:iw1)+cmplx(0.0d0,eta2,8))
+        !Cfac3(nn,1:nw_this) = 1.0d0/( e_ex(nn)-wp(iw0:iw1)+cmplx(0.0d0,eta2,8)) !entirely identical to Bfac2
       end do
     end if
 
@@ -309,7 +311,8 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
 
           do njp = 1, 3
             do nn = 1, norb_ex_cut
-              Amat(nn,1:nw_this) = -xme_ex(njp,nn) * (-pi**2) * gauss3(nn,1:nw_this)
+              !Amat(nn,1:nw_this) = -xme_ex(njp,nn) * (-pi**2) * gauss3(nn,1:nw_this) !gauss3 is simply a copy of gauss2
+              Amat(nn,1:nw_this) = -xme_ex(njp,nn) * (-pi**2) * gauss2(nn,1:nw_this)
             end do
             term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat1(:,1:nw_this), dim=1)
             sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
@@ -331,8 +334,10 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
 
           do njp = 1, 3
             do nn = 1, norb_ex_cut
-              Amat(nn,1:nw_this)  = -xme_ex(njp,nn)        * Cfac3(nn,1:nw_this)
-              Amat2(nn,1:nw_this) = -conjg(xme_ex(njp,nn)) * Cfac3(nn,1:nw_this)
+              !Amat(nn,1:nw_this)  = -xme_ex(njp,nn)        * Cfac3(nn,1:nw_this)
+              Amat(nn,1:nw_this)  = -xme_ex(njp,nn)        * Bfac2(nn,1:nw_this)
+              !Amat2(nn,1:nw_this) = -conjg(xme_ex(njp,nn)) * Cfac3(nn,1:nw_this) !Cfac3 is Bfac2
+              Amat2(nn,1:nw_this) = -conjg(xme_ex(njp,nn)) * Bfac2(nn,1:nw_this)
             end do
             term_total(1:nw_this) = &
                 ( sum(Amat(:,1:nw_this)*Wmat1(:,1:nw_this), dim=1) &
@@ -348,9 +353,11 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
   end do   ! ichunk
 
   if (mode == 1) then
-    deallocate(gauss1, gauss2, gauss3, gauss4)
+    !deallocate(gauss1, gauss2, gauss3, gauss4)
+    deallocate(gauss1, gauss2, gauss4)
   else
-    deallocate(Afac1, Afac2, Bfac1, Bfac2, Cfac3, Dfac3)
+    !deallocate(Afac1, Afac2, Bfac1, Bfac2, Cfac3, Dfac3)
+    deallocate(Afac1, Afac2, Bfac1, Bfac2, Dfac3)
   end if
   deallocate(Mmat1, Mmat2, Bmat1, Bmat2, Bmat3, Bmat4)
   deallocate(Wmat1, Wmat2, Wmat3, Wmat4)

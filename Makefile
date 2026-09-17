@@ -165,6 +165,13 @@ $(TARGET_TEST): $(OBJ_MODULES) $(OBJ_TEST)
 $(OBJ_TEST): $(SRC_TEST) | $(BINDIR) $(BUILDDIR)
 	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
 
+test_matrix: $(BINDIR)/test_shift_intens_ex_matrix
+
+$(BINDIR)/test_shift_intens_ex_matrix: $(OBJ_MODULES) $(BINDIR)/test_shift_intens_ex_matrix.o
+	$(FC) $(FFLAGS) $(OBJ_MODULES) $(BINDIR)/test_shift_intens_ex_matrix.o -o $@ $(LIBS)
+
+$(BINDIR)/test_shift_intens_ex_matrix.o: tests/test_shift_intens_ex_matrix.f90 | $(BUILDDIR) $(BINDIR)
+	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
 
 # -----------------------------------------------------------------
 # Clean
