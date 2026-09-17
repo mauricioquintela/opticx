@@ -54,7 +54,8 @@ module sigma_second_ex
                 'populated — get_ome_ex must be called with iflag_norder=2 first.'
       stop 1
     end if
-    call get_shift_intens_ex(wp,eta2,sigma_w_ex)
+!     call get_shift_intens_ex(wp,eta2,sigma_w_ex)
+    call get_shift_intens_ex_matrix(wp,eta2,sigma_w_ex)
 	!print shift conductivity (ex)
 	call print_sigma_second_ex(nw,wp,sigma_w_ex)
     write(*,*) '    Shift conductivity (ex) has been printed'
@@ -62,143 +63,6 @@ module sigma_second_ex
 
 
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
-! subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
-!     use omp_lib
-!     implicit none
-! 
-!     real(8),    intent(in)    :: wp(nw), eta2
-!     complex(8), intent(inout) :: sigma_w_ex(3,3,3,nw)
-! 
-!     integer     :: iw, nn, nnp, nj, njp, njpp
-!     real(8)     :: omegap, omegaq, omega2
-!     complex(8)  :: shift_kernel_ex1, shift_kernel_ex
-!     ! sigma_w_ex_intra is per-iw — declare as a local scalar accumulator
-!     ! PATCH: computation of this term is commented out below (dead output —
-!     ! never returned, printed, or combined with sigma_w_ex). Left declared
-!     ! and zeroed so it's a one-line change to re-enable if the intraband
-!     ! ("nn==nnp") contribution turns out to be needed later.
-!     !complex(8)  :: sigma_w_ex_intra(3,3,3,nw)
-! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! 
-!     sigma_w_ex       = (0.0d0, 0.0d0)
-!     !sigma_w_ex_intra = (0.0d0, 0.0d0)
-! 
-!     ! Each iw is fully independent: omegap/omegaq/omega2 depend only on iw,
-!     ! and sigma_w_ex(nj,njp,njpp,iw) is written only by thread owning iw.
-!     !$omp parallel do schedule(dynamic) &
-!     !$omp   private(iw, nn, nnp, nj, njp, njpp, &
-!     !$omp           omegap, omegaq, omega2, &
-!     !$omp           shift_kernel_ex1, shift_kernel_ex)
-!     do iw = 1, nw
-!       omegap = wp(iw)
-!       omegaq = -wp(iw)
-!       omega2 = 0.0d0
-! 
-!       do nn = 1, norb_ex_cut
-!         do nj = 1, 3
-!           do njp = 1, 3
-!             do njpp = 1, 3
-! 
-!               ! PATCH: intraband (nn==nnp) term commented out — it was
-!               ! computed at real cost (one extra get_shift_kernel_ex call
-!               ! per (nn,nj,njp,njpp,iw), i.e. an additional
-!               ! O(norb_ex_cut*27*nw) kernel evaluations) but never used
-!               ! downstream: not returned from this subroutine, not printed,
-!               ! not combined with sigma_w_ex. Commenting it out removes
-!               ! that dead work.
-!               !
-!               ! call get_shift_kernel_ex(eta2, nj, njp, njpp, nn, nn, &
-!               !                          omegap, omegaq, omega2, shift_kernel_ex)
-!               ! sigma_w_ex_intra(nj,njp,njpp,iw) = sigma_w_ex_intra(nj,njp,njpp,iw) &
-!               !   + 1.0d0 / (dble(npointstotal) * vcell) * shift_kernel_ex
-! 
-!               do nnp = 1, norb_ex_cut
-!                 call get_shift_kernel_ex(eta2, nj, njp, njpp, nn, nnp, &
-!                                          omegap, omegaq, omega2, shift_kernel_ex1)
-!                 sigma_w_ex(nj,njp,njpp,iw) = sigma_w_ex(nj,njp,njpp,iw) &
-!                   + 1.0d0 / (dble(npointstotal) * vcell) * shift_kernel_ex1
-!               end do
-! 
-!             end do
-!           end do
-!         end do
-!       end do
-!     end do
-!     !$omp end parallel do
-! 
-!   end subroutine get_shift_intens_ex
-
-!   subroutine get_shift_intens_ex_ref(wp, eta2, sigma_w_ex)
-!     use omp_lib
-!     implicit none
-! 
-!     real(8),    intent(in)    :: wp(nw), eta2
-!     complex(8), intent(inout) :: sigma_w_ex(3,3,3,nw)
-! 
-!     integer     :: iw, nn, nnp, nj, njp, njpp
-!     integer     :: mode   ! 1 = gaussian, 2 = lorentzian
-!     real(8)     :: omegap, omegaq, omega2
-!     complex(8)  :: s1, s2, s3
-!     complex(8)  :: shift_kernel_ex1
-!     complex(8), allocatable :: sigma_w_ex_t(:,:,:,:)
-! 
-!     ! PATCH: broadening-mode string comparison hoisted OUT of the hot path.
-!     ! Previously re-evaluated (trim + string compare) on every one of the
-!     ! nw*norb_ex_cut^2*27 calls to get_shift_kernel_ex; now done exactly once.
-!     if (trim(broadening_type_text) == 'gaussian') then
-!       mode = 1
-!     else
-!       mode = 2   ! lorentzian, also the default fallback
-!     end if
-! 
-!     sigma_w_ex = (0.0d0, 0.0d0)
-! 
-!     !$omp parallel default(none) &
-!     !$omp   shared(mode, eta2, wp, nw, norb_ex_cut, npointstotal, vcell, sigma_w_ex) &
-!     !$omp   private(nn, nj, njp, njpp, nnp, iw, omegap, omegaq, omega2, &
-!     !$omp           s1, s2, s3, shift_kernel_ex1, sigma_w_ex_t)
-! 
-!     allocate(sigma_w_ex_t(3,3,3,nw))
-!     sigma_w_ex_t = (0.0d0, 0.0d0)
-! 
-!     !$omp do schedule(dynamic)
-!     do nn = 1, norb_ex_cut
-!       do nj = 1, 3
-!         do njp = 1, 3
-!           do njpp = 1, 3
-!             do nnp = 1, norb_ex_cut
-! 
-!               ! PATCH: frequency-independent physics computed ONCE per
-!               ! (nj,njp,njpp,nn,nnp) instead of nw times.
-!               call get_shift_kernel_ex_static(mode, nj, njp, njpp, nn, nnp, s1, s2, s3)
-! 
-!               do iw = 1, nw
-!                 omegap = wp(iw)
-!                 omegaq = -wp(iw)
-!                 omega2 = 0.0d0
-! 
-!                 call get_shift_kernel_ex_freq(mode, eta2, omegap, omegaq, omega2, &
-!                                               nn, nnp, s1, s2, s3, shift_kernel_ex1)
-! 
-!                 sigma_w_ex_t(nj,njp,njpp,iw) = sigma_w_ex_t(nj,njp,njpp,iw) &
-!                   + 1.0d0 / (dble(npointstotal) * vcell) * shift_kernel_ex1
-!               end do
-! 
-!             end do
-!           end do
-!         end do
-!       end do
-!     end do
-!     !$omp end do
-! 
-!     !$omp critical
-!       sigma_w_ex = sigma_w_ex + sigma_w_ex_t
-!     !$omp end critical
-! 
-!     deallocate(sigma_w_ex_t)
-!     !$omp end parallel
-! 
-!   end subroutine get_shift_intens_ex_ref
   
   subroutine get_shift_intens_ex(wp, eta2, sigma_w_ex)
   use omp_lib
@@ -275,6 +139,226 @@ module sigma_second_ex
   !$omp end parallel
 
 end subroutine get_shift_intens_ex
+  
+  !!!!!!!
+  
+  
+subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
+  implicit none
+
+  real(8),    intent(in)    :: wp(nw), eta2
+  complex(8), intent(inout) :: sigma_w_ex(3,3,3,nw)
+
+  integer, parameter :: nw_chunk = 3000
+  integer :: nj, njp, njpp, nn, nnp
+  integer :: mode
+  integer :: iw0, iw1, nw_this, ichunk, nchunks
+  complex(8), parameter :: ci = (0.0d0,1.0d0), czero=(0.0d0,0.0d0), cone=(1.0d0,0.0d0)
+
+  ! ---- frequency-INDEPENDENT (lorentzian only): full norb_ex_cut length ----
+  complex(8), allocatable :: Afac1(:), Afac2(:)
+
+  ! ---- (nj,njp,njpp)-INDEPENDENT, chunk-sized, rebuilt once per chunk ----
+  complex(8), allocatable :: gauss1(:,:), gauss2(:,:), gauss3(:,:), gauss4(:,:)
+  complex(8), allocatable :: Bfac1(:,:), Bfac2(:,:), Cfac3(:,:), Dfac3(:,:)
+
+  ! ---- per-(index-pair) scratch, chunk-sized, reused across every pair
+  !      and every chunk ----
+  complex(8), allocatable :: Mmat1(:,:), Mmat2(:,:)
+  complex(8), allocatable :: Bmat1(:,:), Bmat2(:,:), Bmat3(:,:), Bmat4(:,:)
+  complex(8), allocatable :: Wmat1(:,:), Wmat2(:,:), Wmat3(:,:), Wmat4(:,:)
+  complex(8), allocatable :: Avec1(:), Avec2(:), Avec3(:), Avec4(:)
+  complex(8), allocatable :: Amat(:,:), Amat2(:,:)
+  complex(8), allocatable :: term_total(:)
+
+  if (trim(broadening_type_text) == 'gaussian') then
+    mode = 1
+  else
+    mode = 2   ! lorentzian, also the default fallback
+  end if
+
+  sigma_w_ex = (0.0d0, 0.0d0)
+
+  allocate(Mmat1(norb_ex_cut,norb_ex_cut), Mmat2(norb_ex_cut,norb_ex_cut))
+  allocate(Bmat1(norb_ex_cut,nw_chunk), Bmat2(norb_ex_cut,nw_chunk))
+  allocate(Bmat3(norb_ex_cut,nw_chunk), Bmat4(norb_ex_cut,nw_chunk))
+  allocate(Wmat1(norb_ex_cut,nw_chunk), Wmat2(norb_ex_cut,nw_chunk))
+  allocate(Wmat3(norb_ex_cut,nw_chunk), Wmat4(norb_ex_cut,nw_chunk))
+  allocate(Avec1(norb_ex_cut), Avec2(norb_ex_cut), Avec3(norb_ex_cut), Avec4(norb_ex_cut))
+  allocate(Amat(norb_ex_cut,nw_chunk), Amat2(norb_ex_cut,nw_chunk))
+  allocate(term_total(nw_chunk))
+
+  if (mode == 1) then
+    allocate(gauss1(norb_ex_cut,nw_chunk), gauss2(norb_ex_cut,nw_chunk))
+    allocate(gauss3(norb_ex_cut,nw_chunk), gauss4(norb_ex_cut,nw_chunk))
+  else
+    allocate(Afac1(norb_ex_cut), Afac2(norb_ex_cut))
+    allocate(Bfac1(norb_ex_cut,nw_chunk), Bfac2(norb_ex_cut,nw_chunk))
+    allocate(Cfac3(norb_ex_cut,nw_chunk), Dfac3(norb_ex_cut,nw_chunk))
+    Afac1(:) = 1.0d0/(-e_ex(:)+cmplx(0.0d0,eta2,8))
+    Afac2(:) = 1.0d0/( e_ex(:)+cmplx(0.0d0,eta2,8))
+  end if
+
+  nchunks = (nw + nw_chunk - 1) / nw_chunk
+
+  do ichunk = 1, nchunks
+    iw0     = (ichunk-1)*nw_chunk + 1
+    iw1     = min(iw0 + nw_chunk - 1, nw)
+    nw_this = iw1 - iw0 + 1
+
+    ! ---- per-chunk, (nj,njp,njpp)-independent broadening factors ----
+    if (mode == 1) then
+      do nn = 1, norb_ex_cut
+        gauss1(nn,1:nw_this) = 1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)* &
+            exp(-0.5d0/(eta2**2)*(-wp(iw0:iw1)-e_ex(nn))**2)
+        gauss2(nn,1:nw_this) = 1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)* &
+            exp(-0.5d0/(eta2**2)*(-wp(iw0:iw1)+e_ex(nn))**2)
+        gauss3(nn,1:nw_this) = gauss2(nn,1:nw_this)
+        gauss4(nn,1:nw_this) = 1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)* &
+            exp(-0.5d0/(eta2**2)*( wp(iw0:iw1)-e_ex(nn))**2)
+      end do
+    else
+      do nn = 1, norb_ex_cut
+        Bfac1(nn,1:nw_this) = 1.0d0/(-wp(iw0:iw1)-e_ex(nn)+cmplx(0.0d0,eta2,8))
+        Bfac2(nn,1:nw_this) = 1.0d0/(-wp(iw0:iw1)+e_ex(nn)+cmplx(0.0d0,eta2,8))
+        Dfac3(nn,1:nw_this) = 1.0d0/( wp(iw0:iw1)-e_ex(nn)+cmplx(0.0d0,eta2,8))
+        Cfac3(nn,1:nw_this) = 1.0d0/( e_ex(nn)-wp(iw0:iw1)+cmplx(0.0d0,eta2,8))
+      end do
+    end if
+
+    ! =================================================================
+    ! TERM 1 + TERM 2: the zgemm depends only on (njp,njpp). Loop those
+    ! outermost; nj enters only in the cheap reduction below.
+    ! =================================================================
+    do njp = 1, 3
+      do njpp = 1, 3
+
+        if (mode == 1) then
+          do nnp = 1, norb_ex_cut
+            Bmat1(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) * (-ci*pi) * gauss1(nnp,1:nw_this)
+            Bmat2(nnp,1:nw_this) = xme_ex(njpp,nnp)        * (-ci*pi) * gauss2(nnp,1:nw_this)
+          end do
+          Mmat1 = xme_ex_inter(njp,:,:)
+          Mmat2 = conjg(Mmat1)
+
+          call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat1, norb_ex_cut, &
+                      Bmat1, norb_ex_cut, czero, Wmat1, norb_ex_cut)
+          call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat2, norb_ex_cut, &
+                      Bmat2, norb_ex_cut, czero, Wmat2, norb_ex_cut)
+
+          do nj = 1, 3
+            Avec1(:) = -vme_ex(nj,:) / e_ex(:)
+            Avec2(:) = conjg(vme_ex(nj,:)) / e_ex(:)
+            term_total(1:nw_this) = matmul(Avec1, Wmat1(:,1:nw_this)) &
+                                   + matmul(Avec2, Wmat2(:,1:nw_this))
+            sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
+                - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+          end do
+
+        else   ! lorentzian
+          do nnp = 1, norb_ex_cut
+            Bmat1(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) * Bfac1(nnp,1:nw_this)
+            Bmat2(nnp,1:nw_this) = xme_ex(njpp,nnp)        * Bfac1(nnp,1:nw_this)
+            Bmat3(nnp,1:nw_this) = xme_ex(njpp,nnp)        * Bfac2(nnp,1:nw_this)
+            Bmat4(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) * Bfac2(nnp,1:nw_this)
+          end do
+          Mmat1 = xme_ex_inter(njp,:,:)
+          Mmat2 = conjg(Mmat1)
+
+          call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat1, norb_ex_cut, &
+                      Bmat1, norb_ex_cut, czero, Wmat1, norb_ex_cut)
+          call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat2, norb_ex_cut, &
+                      Bmat2, norb_ex_cut, czero, Wmat2, norb_ex_cut)
+          call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat2, norb_ex_cut, &
+                      Bmat3, norb_ex_cut, czero, Wmat3, norb_ex_cut)
+          call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat1, norb_ex_cut, &
+                      Bmat4, norb_ex_cut, czero, Wmat4, norb_ex_cut)
+
+          do nj = 1, 3
+            Avec1(:) = vme_ex(nj,:)        * Afac1(:)   ! term1, A
+            Avec2(:) = conjg(vme_ex(nj,:)) * Afac1(:)   ! term1, A*
+            Avec3(:) = conjg(vme_ex(nj,:)) * Afac2(:)   ! term2, A
+            Avec4(:) = vme_ex(nj,:)        * Afac2(:)   ! term2, A*
+
+            term_total(1:nw_this) = &
+                ( matmul(Avec1, Wmat1(:,1:nw_this)) - matmul(Avec2, Wmat2(:,1:nw_this)) &
+                + matmul(Avec3, Wmat3(:,1:nw_this)) - matmul(Avec4, Wmat4(:,1:nw_this)) ) / (2.0d0*ci)
+
+            sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
+                - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+          end do
+        end if
+
+      end do
+    end do
+
+    ! =================================================================
+    ! TERM 3: the zgemm depends only on (nj,njpp). Loop those outermost;
+    ! njp enters only in the cheap reduction below.
+    ! =================================================================
+    do nj = 1, 3
+      do njpp = 1, 3
+
+        if (mode == 1) then
+          do nnp = 1, norb_ex_cut
+            Bmat1(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) * gauss4(nnp,1:nw_this)
+          end do
+          Mmat1 = vme_ex_inter(nj,:,:)
+          call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat1, norb_ex_cut, &
+                      Bmat1, norb_ex_cut, czero, Wmat1, norb_ex_cut)
+
+          do njp = 1, 3
+            do nn = 1, norb_ex_cut
+              Amat(nn,1:nw_this) = -xme_ex(njp,nn) * (-pi**2) * gauss3(nn,1:nw_this)
+            end do
+            term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat1(:,1:nw_this), dim=1)
+            sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
+                - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+          end do
+
+        else   ! lorentzian
+          do nnp = 1, norb_ex_cut
+            Bmat1(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) * Dfac3(nnp,1:nw_this)
+            Bmat2(nnp,1:nw_this) = xme_ex(njpp,nnp)        * Dfac3(nnp,1:nw_this)
+          end do
+          Mmat1 = vme_ex_inter(nj,:,:)
+          Mmat2 = conjg(Mmat1)
+
+          call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat1, norb_ex_cut, &
+                      Bmat1, norb_ex_cut, czero, Wmat1, norb_ex_cut)
+          call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat2, norb_ex_cut, &
+                      Bmat2, norb_ex_cut, czero, Wmat2, norb_ex_cut)
+
+          do njp = 1, 3
+            do nn = 1, norb_ex_cut
+              Amat(nn,1:nw_this)  = -xme_ex(njp,nn)        * Cfac3(nn,1:nw_this)
+              Amat2(nn,1:nw_this) = -conjg(xme_ex(njp,nn)) * Cfac3(nn,1:nw_this)
+            end do
+            term_total(1:nw_this) = &
+                ( sum(Amat(:,1:nw_this)*Wmat1(:,1:nw_this), dim=1) &
+                - sum(Amat2(:,1:nw_this)*Wmat2(:,1:nw_this), dim=1) ) / (2.0d0*ci)
+            sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
+                - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+          end do
+        end if
+
+      end do
+    end do
+
+  end do   ! ichunk
+
+  if (mode == 1) then
+    deallocate(gauss1, gauss2, gauss3, gauss4)
+  else
+    deallocate(Afac1, Afac2, Bfac1, Bfac2, Cfac3, Dfac3)
+  end if
+  deallocate(Mmat1, Mmat2, Bmat1, Bmat2, Bmat3, Bmat4)
+  deallocate(Wmat1, Wmat2, Wmat3, Wmat4)
+  deallocate(Avec1, Avec2, Avec3, Avec4, Amat, Amat2, term_total)
+
+end subroutine get_shift_intens_ex_matrix
+  
+  !!!!
   
   ! Frequency-independent part: s1, s2, s3 only.
   subroutine get_shift_kernel_ex_static(mode, nj, njp, njpp, nn, nnp, s1, s2, s3)
