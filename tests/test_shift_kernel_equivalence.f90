@@ -85,9 +85,9 @@ program test_shift_kernel_equivalence
 
               ! new: array-based path, evaluated at the same iw
               if (mode == 1) then
-                new_val = -( s1*(-cmplx(0.0d0,1.0d0,8)*pi*d1_arr(iw)) &
+                new_val = +( s1*(-cmplx(0.0d0,1.0d0,8)*pi*d1_arr(iw)) &
                            + s2*(-cmplx(0.0d0,1.0d0,8)*pi*d2_arr(iw)) &
-                           + s3*(-pi**2*d3_arr(iw)*d4_arr(iw)) )
+                           + s3*(-pi**2*d3_arr(iw)*d4_arr(iw)) )   ! sign: paper Eq. 10 convention
               else
                 new_val = -( s1*d1_arr(iw) + s2*d2_arr(iw) + s3*d3_arr(iw) )
               end if

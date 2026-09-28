@@ -80,6 +80,16 @@ module sigma_first_ex
     close(10)
   end subroutine read_ome_ex_linear
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  ! FLAG (physics, unchanged for now): vme_ex is the BARE momentum matrix element
+  ! P_n = sum psi * v_cv (Taghizadeh & Pedersen, PRB 97, 205432, Eq. B2a), so this is
+  ! sigma = pi/(Nk V) |P_n|^2/E_n delta(w-E_n), the bare-momentum ("C'") response. It is identical to
+  ! Xatu's skubo_w.f90 (checked on hBN, 60x60 grid, eta = 0.08 eV: agreement 3e-7), but the paper's
+  ! methods A/B use the Heisenberg momentum Pi_n = -i E_n X_n = P_n - i F_n (Eq. 10; F_n != 0 with
+  ! e-h interaction), i.e. E_n |X_n|^2 instead of |P_n|^2/E_n. On hBN this makes the first peak
+  ! (P/Pi)^2 = 2.34 times too large (3.147 vs 1.345 a.u.; 2.1-2.15 above 6.6 eV; the paper's Fig. 1
+  ! shows the same ~2.1x C' vs A-D). The full-omega method B (Eq. 4b) matches the Pi form to 3e-4.
+  ! Not switched yet: needs X_n, which is only filled when the nonlinear matrix elements are
+  ! requested (see HANDOFF.md section 8).
   subroutine get_kubo_intens_ex(vme_ex,nw,wp,eta1,sigma_w_ex)
     implicit none
     !dimension skubo_ex_int(3,3,norb_ex_cut)
@@ -97,7 +107,8 @@ module sigma_first_ex
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	  
     skubo_ex_int=0.0d0
     sigma_w_ex=0.0d0
-    !$omp parallel do schedule(static) private(nn,nj,njp,iw,skubo_ex_int,delta_n_ex) &
+    !$omp parallel do default(none) schedule(static) private(nn,nj,njp,iw,skubo_ex_int,delta_n_ex) &
+    !$omp   shared(npointstotal, norb_ex_cut, nw, vcell, e_ex, vme_ex, wp, eta1, broadening_type_text) &
     !$omp   reduction(+:sigma_w_ex)
     do nn=1,norb_ex_cut
       do nj=1,3
@@ -130,7 +141,6 @@ module sigma_first_ex
         end do
       end do
     end do  
-    !$omp end parallel do
 
   end subroutine get_kubo_intens_ex
 
@@ -150,9 +160,10 @@ module sigma_first_ex
     open(55,file='sigma_first_ex_imag_'//trim(material_name)//'.dat')
     
     feps=1.0d0 !use atomic units
-    !$omp parallel do schedule(static) ordered private(iw)
+    ! serial on purpose (audit 2026-09-24): this loop is pure file I/O and every iteration was
+    ! inside !$omp ordered, which serialises it completely -- the parallel wrapper only added
+    ! thread spawn and synchronisation cost. HANDOFF 8.35.
     do iw=1,nw
-      !$omp ordered
       write(50,*) wp(iw)*27.211385d0, &
         realpart(feps*sigma_w_ex(1,1,iw)), &
         realpart(feps*sigma_w_ex(1,2,iw)), &
@@ -174,9 +185,7 @@ module sigma_first_ex
           aimag(feps*sigma_w_ex(3,1,iw)), &
           aimag(feps*sigma_w_ex(3,2,iw)), &
           aimag(feps*sigma_w_ex(3,3,iw))	
-      !$omp end ordered
     end do
-    !$omp end parallel do
 
     close(50)
     close(55)

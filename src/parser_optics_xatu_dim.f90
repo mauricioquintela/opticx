@@ -1,7 +1,7 @@
 module parser_optics_xatu_dim
   use constants_math
   use parser_wannier90_tb, &
-    only:material_name,R,nRvec !variables
+    only:material_name,R,nRvec,norb !variables
   use parser_input_file, &
     only:xatu_eigval_filepath_in,xatu_states_filepath_in, & !filepaths
       ndim,npointstotal_sq, & !variables
@@ -68,7 +68,19 @@ subroutine get_optics_xatu_dim()
   !change syntax for band counting
   !XATU: ...-1 0 1 2... to explicit band count
   !opticx: ...nf-1,nf,nf+1...
-  nband_index(:)=nband_index(:)+nf 
+  nband_index(:)=nband_index(:)+nf
+
+  ! Validate every Bandlist entry (shifted by Nfermi above) against the actual orbital count.
+  ! Without this, an out-of-range entry silently indexes e(:)/vme(:,:,:) out of bounds in
+  ! get_ome_sp (ome_sp.f90) -- wrong energies/matrix elements with no diagnostic, or a crash
+  ! only under -fcheck=all with no message identifying the actual misconfigured entry.
+  do j=1,nband_ex
+    if (nband_index(j)<1 .or. nband_index(j)>norb) then
+      write(*,*) 'ERROR: Bandlist entry',j,'resolves to band',nband_index(j), &
+                  ', outside the valid range 1..',norb,'(check Bandlist and Nfermi).'
+      stop 1
+    end if
+  end do
 
   !allocate grid and exciton arrays
   allocate (rkxvector(npointstotal))
@@ -455,13 +467,20 @@ subroutine get_grid()
   implicit none
  
   integer :: k,i1,i2,i3
-  real(8) :: step,r1,r2,r3
+  real(8) :: step,offset,r1,r2,r3
   logical :: active_x, active_y, active_z
   active_x = (NORM2(real(nRvec(:,1))) /= 0.0d0)
   active_y = (NORM2(real(nRvec(:,2))) /= 0.0d0)
   active_z = (NORM2(real(nRvec(:,3))) /= 0.0d0)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  step=1.0d0/dble(npointstotal_sq-1)
+  ! Same mesh as Xatu (Lattice::brillouinZoneMesh, Monkhorst-Pack, Gamma-centred): along each reciprocal axis
+  ! u = c/n - 1/2, c = 0..n-1, plus 1/2 added to c for odd n (u = (c+1/2)/n - 1/2, symmetric, no zone edge). So the
+  ! spacing is 1/n and one zone edge (-1/2, even n only) is present once; it used to be 1/(n-1) with both edges
+  ! included (a non-periodic mesh with an O(1/n) error, e.g. 12% in the hBN shift conductivity at n = 30).
+  ! The first reciprocal axis varies fastest, as in Xatu. Verified against the Xatu .states files for n = 30, 45, 60.
+  step=1.0d0/dble(npointstotal_sq)
+  offset=0.0d0
+  if (mod(npointstotal_sq,2) == 1) offset=0.5d0
 
   ! 1D
   if ( ndim == 1 ) then
@@ -469,7 +488,7 @@ subroutine get_grid()
     if ( active_z ) then
       k=1
       do i1=1,npointstotal_sq
-        r1=-0.5d0+dble(i1-1)*step
+        r1=-0.5d0+(dble(i1-1)+offset)*step
         rkxvector(k)=0.0d0
         rkyvector(k)=0.0d0
         rkzvector(k)=r1*G(3,3)  
@@ -479,7 +498,7 @@ subroutine get_grid()
     elseif ( active_y ) then
       k=1
       do i1=1,npointstotal_sq
-        r1=-0.5d0+dble(i1-1)*step
+        r1=-0.5d0+(dble(i1-1)+offset)*step
         rkxvector(k)=0.0d0
         rkyvector(k)=r1*G(2,2)  
         rkzvector(k)=0.0d0
@@ -489,7 +508,7 @@ subroutine get_grid()
     else
       k=1
       do i1=1,npointstotal_sq
-        r1=-0.5d0+dble(i1-1)*step
+        r1=-0.5d0+(dble(i1-1)+offset)*step
         rkxvector(k)=r1*G(1,1) 
         rkyvector(k)=0.0d0 
         rkzvector(k)=0.0d0
@@ -509,9 +528,9 @@ subroutine get_grid()
       ! active axes: rk2 (fast) and rk3 (slow)
       k=1
       do i2=1,npointstotal_sq        ! rk3 slow
-        r2=-0.5d0+dble(i2-1)*step
+        r2=-0.5d0+(dble(i2-1)+offset)*step
         do i1=1,npointstotal_sq      ! rk2 fast
-          r1=-0.5d0+dble(i1-1)*step
+          r1=-0.5d0+(dble(i1-1)+offset)*step
           rkxvector(k)=0.0d0
           rkyvector(k)=r1*G(2,2)+r2*G(3,2) 
           rkzvector(k)=r1*G(2,3)+r2*G(3,3) 
@@ -523,9 +542,9 @@ subroutine get_grid()
       ! active axes: rk1 (fast) and rk3 (slow)
       k=1
       do i2=1,npointstotal_sq        ! rk3 slow
-        r2=-0.5d0+dble(i2-1)*step
+        r2=-0.5d0+(dble(i2-1)+offset)*step
         do i1=1,npointstotal_sq      ! rk1 fast
-          r1=-0.5d0+dble(i1-1)*step
+          r1=-0.5d0+(dble(i1-1)+offset)*step
           rkxvector(k)=r1*G(1,1)+r2*G(3,1) 
           rkyvector(k)=0.0d0
           rkzvector(k)=r1*G(1,3)+r2*G(3,3) 
@@ -537,9 +556,9 @@ subroutine get_grid()
       ! active axes: rk1 (fast) and rk2 (slow)
       k=1
       do i2=1,npointstotal_sq        ! rk2 slow
-        r2=-0.5d0+dble(i2-1)*step
+        r2=-0.5d0+(dble(i2-1)+offset)*step
         do i1=1,npointstotal_sq      ! rk1 fast
-          r1=-0.5d0+dble(i1-1)*step
+          r1=-0.5d0+(dble(i1-1)+offset)*step
           rkxvector(k)=r1*G(1,1)+r2*G(2,1) 
           rkyvector(k)=r1*G(1,2)+r2*G(2,2) 
           rkzvector(k)=0.0d0
@@ -558,11 +577,11 @@ subroutine get_grid()
   else  
     k=1
     do i3=1,npointstotal_sq          ! rk3 slow
-      r3=-0.5d0+dble(i3-1)*step
+      r3=-0.5d0+(dble(i3-1)+offset)*step
       do i2=1,npointstotal_sq        ! rk2 middle
-        r2=-0.5d0+dble(i2-1)*step
+        r2=-0.5d0+(dble(i2-1)+offset)*step
         do i1=1,npointstotal_sq      ! rk1 fast
-          r1=-0.5d0+dble(i1-1)*step
+          r1=-0.5d0+(dble(i1-1)+offset)*step
           rkxvector(k)=r1*G(1,1)+r2*G(2,1)+r3*G(3,1)
           rkyvector(k)=r1*G(1,2)+r2*G(2,2)+r3*G(3,2)
           rkzvector(k)=r1*G(1,3)+r2*G(2,3)+r3*G(3,3)

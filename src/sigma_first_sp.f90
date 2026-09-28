@@ -52,8 +52,9 @@ module sigma_first_sp
     ! * REDUCTION: sigma_w_sp is accumulated across threads safely.
     ! ----------------------------------------------------------------
     !$OMP PARALLEL DO          &
-    !$OMP   DEFAULT(SHARED)    &
+    !$OMP   DEFAULT(NONE)      &
     !$OMP   PRIVATE(ibz, e_nband_local, vme_nband_local) &
+    !$OMP   SHARED(npointstotal, nband_ex, nw, vcell, ek, vme_ex_band, wp, eta1) &
     !$OMP   REDUCTION(+:sigma_w_sp) &
     !$OMP   SCHEDULE(dynamic)
     do ibz=1,npointstotal
@@ -210,6 +211,15 @@ module sigma_first_sp
 ! 
 !   end subroutine get_kubo_intens_sp
   
+  !> Linear conductivity at one k-point, Kubo form with a Lorentzian of width eta1.
+  !! Accumulated over the mesh by the caller and divided by Nk*vcell.
+  !! @param nband_ex      Bands in the window.
+  !! @param npointstotal  k-points in the mesh (normalisation only).
+  !! @param vcell         Unit-cell volume/area.
+  !! @param e, vme        Band energies and velocity matrix elements at this k-point.
+  !! @param nw, wp, eta1  Frequency grid and broadening.
+  !! @param sigma_w_sp    Accumulated onto, not overwritten.
+  !! @return void
   subroutine get_kubo_intens_sp(nband_ex,npointstotal,vcell,e,vme,nw,wp,eta1,sigma_w_sp)
     implicit none
     integer,    intent(in)    :: nw, nband_ex, npointstotal

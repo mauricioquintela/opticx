@@ -67,6 +67,14 @@ module constants_math
 !     call zheev(JOBZ, UPLO, n, h, n, w, WORK, LWORK, RWORK, INFO)
 !   end subroutine diagoz
   
+!> Diagonalises a complex Hermitian matrix in place (LAPACK zheev, 'V','U').
+!! Used for H(k) throughout: the eigenvector phase it returns is arbitrary and
+!! k-dependent, which is why anything differentiating in k must fix the gauge first
+!! (see get_berry_eigen_fourpoint in ome_sp.f90).
+!! @param n  Matrix dimension.
+!! @param w  On exit, the n eigenvalues in ascending order.
+!! @param h  On entry the matrix; on exit its eigenvectors, column n holding |psi_n>.
+!! @return void
 subroutine diagoz(n,w,h)
   implicit none
   integer, intent(in) :: n

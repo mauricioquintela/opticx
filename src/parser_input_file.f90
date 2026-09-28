@@ -9,6 +9,9 @@ module parser_input_file
   public :: iflag_ome_sp_text
   public :: iflag_ome_ex_text
   public :: response_text
+  ! Second-order two-frequency control (2026-09-24, HANDOFF 8.36).
+  ! sigma^{abc}(w_p + w_q; w_p, w_q). Two ways to say what w_q is:
+  public :: cache_ome_read, cache_ome_write
   public :: iflag_xatu
   public :: iflag_ome_sp
   public :: iflag_ome_ex
@@ -32,6 +35,13 @@ module parser_input_file
   character(len=1000) :: xatu_eigval_filepath_in
   character(len=1000) :: xatu_states_filepath_in
   character(len=100) :: response_text
+  ! Opt-in cache of the second-order excitonic OMEs (HANDOFF 8.44). Both default .false.: the cache
+  ! header fingerprints the exciton solution but NOT the Wannier90 model, so reuse is a choice.
+  ! Read and write are INDEPENDENT -- a large run may be worth reading back but too big to store
+  ! (the payload is 6*N^2 complex(8): 338 MB at N = 1875, 3.0 GB at N = 5625, 9.6 GB at N = 10000).
+  logical :: cache_ome_read  = .false.
+  logical :: cache_ome_write = .false.
+  character(len=100) :: cache_ome_ex_text = 'false'
 
   logical :: iflag_xatu
   logical :: iflag_ome_sp
@@ -169,6 +179,24 @@ module parser_input_file
             read(10,*) iflag_write_exk_text
             write_exk_found = .true.
             
+          else if (index(param_name, 'Cache_ome_ex') > 0) then
+            read(10,'(A)') cache_ome_ex_text
+            cache_ome_ex_text = to_lower(adjustl(cache_ome_ex_text))
+            select case (trim(cache_ome_ex_text))
+              case ('read')
+                cache_ome_read = .true.;  cache_ome_write = .false.
+              case ('write')
+                cache_ome_read = .false.; cache_ome_write = .true.
+              case ('true', 'readwrite', 'both', '.true.')
+                cache_ome_read = .true.;  cache_ome_write = .true.
+              case ('false', 'off', 'none', '.false.')
+                cache_ome_read = .false.; cache_ome_write = .false.
+              case default
+                write(*,*) 'ERROR (parser_input_file): Cache_ome_ex = "'// &
+                           trim(cache_ome_ex_text)//'" is not recognised.'
+                write(*,*) '       Valid: read, write, readwrite (= true, both), off (= false, none).'
+                stop 1
+            end select
           else if (index(param_name, 'Energy_variables') > 0) then
             read(10,*) e1, e2, eta, nw
             energy_found = .true.
@@ -186,7 +214,12 @@ module parser_input_file
       ! Handle bandlist case: allocate nband_index if bandlist was found
       if (bandlist_found) then
         allocate(nband_index(num_values))
-        nband_index(:) = narray(:)
+        ! narray may be over-allocated (its size, ncount, is estimated by counting spaces in the
+      ! raw line, which over-counts on a leading space or a doubled inter-number space); the
+      ! successfully-parsed tokens are always packed at the front, narray(1:num_values), so copy
+      ! only that slice -- copying the whole (possibly larger) array crashes under -fcheck=all
+      ! ("Array bound mismatch") or silently truncates the Bandlist without it.
+      nband_index(:) = narray(1:num_values)
       end if
       
       ! Set npointstotal_sq to 0 if using xatu interface
@@ -265,4 +298,10 @@ module parser_input_file
 
     end subroutine
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  ! Builds the list of (omega_p, omega_q) pairs for a general second-order run, in Hartree.
+  ! Two modes (HANDOFF 8.36):
+  ! Shared by the single-particle and excitonic drivers so the two can never drift apart.
+
 end module parser_input_file

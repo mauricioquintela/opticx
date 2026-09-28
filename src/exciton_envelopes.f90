@@ -42,6 +42,23 @@ module exciton_envelopes
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  ! Flat index of the nearest neighbour of point ibz along one grid direction, with
+  ! periodic wrap-around. step = index stride of that direction, cnt = number of points
+  ! along it, pos = 1-based position of ibz along it, sgn = +1 (next) or -1 (previous).
+  pure integer function k_neighbor(ibz, step, cnt, pos, sgn) result(nb)
+    integer, intent(in) :: ibz, step, cnt, pos, sgn
+    nb = ibz + sgn*step
+    if (sgn > 0 .and. pos == cnt) nb = nb - cnt*step
+    if (sgn < 0 .and. pos == 1)   nb = nb + cnt*step
+  end function k_neighbor
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  !> k-derivative of the exciton envelope functions, d/dk psi^(n)_cvk, by central
+  !! differences on the Monkhorst-Pack mesh. Neighbours are taken periodically
+  !! (k_neighbor wraps the zone edge); zeroing the edge points instead makes the
+  !! inter-exciton position matrix X_nm non-Hermitian by 12.6% on a 30x30 grid.
+  !! Feeds the Q-part of X_nm, Eq. (B3b) of Taghizadeh & Pedersen, PRB 97, 205432 (2018).
+  !! @return void (fills the module array fk_ex_der)
   subroutine get_fk_ex_der_k()
     use omp_lib
     implicit none
@@ -63,7 +80,6 @@ module exciton_envelopes
     real(8)  :: dRkdK(3,3)                      ! dRkdK(i,a) = d(rk_i)/d(k_a), constant, computed once
     complex(8) :: d_rk(3)                       ! central-difference df/d(rk_i), i=1,2,3
     integer  :: i_fast, i_mid, i_slow           ! grid-index position along each active direction
-    logical  :: at_boundary
 
     ! PATCH: compute once, up front, instead of locally on every call.
     if (.not. active_flags_set) call set_active_flags()
@@ -127,10 +143,12 @@ module exciton_envelopes
 
     write(*,*) '   Evaluating exciton envelope function derivative with respect to k...'
 
-    !$omp parallel do collapse(2) schedule(dynamic) &
+    !$omp parallel do collapse(2) default(none) schedule(dynamic) &
     !$omp private(j, nn, ibz, nj, j_aux, &
-    !$omp         d_rk, i_fast, i_mid, i_slow, at_boundary, &
-    !$omp         fk_ex_col, fk_der_col)
+    !$omp         d_rk, i_fast, i_mid, i_slow, &
+    !$omp         fk_ex_col, fk_der_col) &
+    !$omp   shared(npointstotal, norb_ex_band, norb_ex_cut, nside, ndim, drkdk) &
+    !$omp   shared(fk_ex, fk_ex_der, active_x, active_y, active_z, slice1, slice2, slice3)
     do j = 1, norb_ex_band
       do nn = 1, norb_ex_cut
 
@@ -146,53 +164,44 @@ module exciton_envelopes
 
         do ibz = 1, npointstotal
           d_rk = (0.0d0, 0.0d0)
-          at_boundary = .false.
 
+          ! Central differences with PERIODIC wrap-around. The mesh covers one full
+          ! reciprocal cell and, in the lattice gauge (H(k+G)=H(k)), the smooth-gauge
+          ! envelope is periodic, so zone-edge points use their neighbours across the
+          ! boundary. (Skipping them left the derivative operator non-antisymmetric,
+          ! which made X_nm non-Hermitian.)
           if (ndim == 1) then
 
             if (active_z) then
-              at_boundary = (ibz == 1 .or. ibz == npointstotal)
-              if (.not. at_boundary) &
-                d_rk(3) = (fk_ex_col(ibz+1) - fk_ex_col(ibz-1)) / (2.0d0*slice3)
+              d_rk(3) = (fk_ex_col(k_neighbor(ibz,1,npointstotal,ibz, 1)) &
+                       - fk_ex_col(k_neighbor(ibz,1,npointstotal,ibz,-1))) / (2.0d0*slice3)
             else if (active_y) then
-              at_boundary = (ibz == 1 .or. ibz == npointstotal)
-              if (.not. at_boundary) &
-                d_rk(2) = (fk_ex_col(ibz+1) - fk_ex_col(ibz-1)) / (2.0d0*slice2)
+              d_rk(2) = (fk_ex_col(k_neighbor(ibz,1,npointstotal,ibz, 1)) &
+                       - fk_ex_col(k_neighbor(ibz,1,npointstotal,ibz,-1))) / (2.0d0*slice2)
             else
-              at_boundary = (ibz == 1 .or. ibz == npointstotal)
-              if (.not. at_boundary) &
-                d_rk(1) = (fk_ex_col(ibz+1) - fk_ex_col(ibz-1)) / (2.0d0*slice1)
+              d_rk(1) = (fk_ex_col(k_neighbor(ibz,1,npointstotal,ibz, 1)) &
+                       - fk_ex_col(k_neighbor(ibz,1,npointstotal,ibz,-1))) / (2.0d0*slice1)
             end if
 
           else if (ndim == 2) then
 
-            if (active_x .and. active_y) then
-              i_fast = mod(ibz-1, nside) + 1          ! direction 1, step 1
-              i_slow = (ibz-1)/nside + 1               ! direction 2, step nside
-              at_boundary = (i_fast == 1 .or. i_fast == nside .or. &
-                             i_slow == 1 .or. i_slow == nside)
-              if (.not. at_boundary) then
-                d_rk(1) = (fk_ex_col(ibz+1)     - fk_ex_col(ibz-1))     / (2.0d0*slice1)
-                d_rk(2) = (fk_ex_col(ibz+nside) - fk_ex_col(ibz-nside)) / (2.0d0*slice2)
-              end if
-            else if (active_x .and. active_z) then
-              i_fast = mod(ibz-1, nside) + 1          ! direction 1, step 1
-              i_slow = (ibz-1)/nside + 1               ! direction 3, step nside
-              at_boundary = (i_fast == 1 .or. i_fast == nside .or. &
-                             i_slow == 1 .or. i_slow == nside)
-              if (.not. at_boundary) then
-                d_rk(1) = (fk_ex_col(ibz+1)     - fk_ex_col(ibz-1))     / (2.0d0*slice1)
-                d_rk(3) = (fk_ex_col(ibz+nside) - fk_ex_col(ibz-nside)) / (2.0d0*slice3)
-              end if
-            else  ! active_y .and. active_z
-              i_fast = mod(ibz-1, nside) + 1          ! direction 2, step 1
-              i_slow = (ibz-1)/nside + 1               ! direction 3, step nside
-              at_boundary = (i_fast == 1 .or. i_fast == nside .or. &
-                             i_slow == 1 .or. i_slow == nside)
-              if (.not. at_boundary) then
-                d_rk(2) = (fk_ex_col(ibz+1)     - fk_ex_col(ibz-1))     / (2.0d0*slice2)
-                d_rk(3) = (fk_ex_col(ibz+nside) - fk_ex_col(ibz-nside)) / (2.0d0*slice3)
-              end if
+            i_fast = mod(ibz-1, nside) + 1          ! step 1
+            i_slow = (ibz-1)/nside + 1               ! step nside
+            if (active_x .and. active_y) then       ! fast = direction 1, slow = direction 2
+              d_rk(1) = (fk_ex_col(k_neighbor(ibz,1,    nside,i_fast, 1)) &
+                       - fk_ex_col(k_neighbor(ibz,1,    nside,i_fast,-1))) / (2.0d0*slice1)
+              d_rk(2) = (fk_ex_col(k_neighbor(ibz,nside,nside,i_slow, 1)) &
+                       - fk_ex_col(k_neighbor(ibz,nside,nside,i_slow,-1))) / (2.0d0*slice2)
+            else if (active_x .and. active_z) then  ! fast = direction 1, slow = direction 3
+              d_rk(1) = (fk_ex_col(k_neighbor(ibz,1,    nside,i_fast, 1)) &
+                       - fk_ex_col(k_neighbor(ibz,1,    nside,i_fast,-1))) / (2.0d0*slice1)
+              d_rk(3) = (fk_ex_col(k_neighbor(ibz,nside,nside,i_slow, 1)) &
+                       - fk_ex_col(k_neighbor(ibz,nside,nside,i_slow,-1))) / (2.0d0*slice3)
+            else                                    ! fast = direction 2, slow = direction 3
+              d_rk(2) = (fk_ex_col(k_neighbor(ibz,1,    nside,i_fast, 1)) &
+                       - fk_ex_col(k_neighbor(ibz,1,    nside,i_fast,-1))) / (2.0d0*slice2)
+              d_rk(3) = (fk_ex_col(k_neighbor(ibz,nside,nside,i_slow, 1)) &
+                       - fk_ex_col(k_neighbor(ibz,nside,nside,i_slow,-1))) / (2.0d0*slice3)
             end if
 
           else  ! ndim == 3
@@ -200,25 +209,19 @@ module exciton_envelopes
             i_fast = mod(ibz-1, nside) + 1
             i_mid  = mod((ibz-1)/nside, nside) + 1
             i_slow = (ibz-1)/(nside*nside) + 1
-            at_boundary = (i_fast == 1 .or. i_fast == nside .or. &
-                           i_mid  == 1 .or. i_mid  == nside .or. &
-                           i_slow == 1 .or. i_slow == nside)
-            if (.not. at_boundary) then
-              d_rk(1) = (fk_ex_col(ibz+1)               - fk_ex_col(ibz-1))               / (2.0d0*slice1)
-              d_rk(2) = (fk_ex_col(ibz+nside)            - fk_ex_col(ibz-nside))            / (2.0d0*slice2)
-              d_rk(3) = (fk_ex_col(ibz+nside*nside)      - fk_ex_col(ibz-nside*nside))      / (2.0d0*slice3)
-            end if
+            d_rk(1) = (fk_ex_col(k_neighbor(ibz,1,          nside,i_fast, 1)) &
+                     - fk_ex_col(k_neighbor(ibz,1,          nside,i_fast,-1))) / (2.0d0*slice1)
+            d_rk(2) = (fk_ex_col(k_neighbor(ibz,nside,      nside,i_mid,  1)) &
+                     - fk_ex_col(k_neighbor(ibz,nside,      nside,i_mid, -1))) / (2.0d0*slice2)
+            d_rk(3) = (fk_ex_col(k_neighbor(ibz,nside*nside,nside,i_slow, 1)) &
+                     - fk_ex_col(k_neighbor(ibz,nside*nside,nside,i_slow,-1))) / (2.0d0*slice3)
 
           end if
 
-          if (.not. at_boundary) then
-            ! Chain rule: df/dk_a = sum_i (df/drk_i) * d(rk_i)/dk_a
-            do nj = 1, 3
-              fk_der_col(nj,ibz) = d_rk(1)*dRkdK(1,nj) + d_rk(2)*dRkdK(2,nj) + d_rk(3)*dRkdK(3,nj)
-            end do
-          end if
-          ! at_boundary points keep fk_der_col(:,ibz) = 0, same as the
-          ! original's "cycle" behaviour at zone-boundary points.
+          ! Chain rule: df/dk_a = sum_i (df/drk_i) * d(rk_i)/dk_a
+          do nj = 1, 3
+            fk_der_col(nj,ibz) = d_rk(1)*dRkdK(1,nj) + d_rk(2)*dRkdK(2,nj) + d_rk(3)*dRkdK(3,nj)
+          end do
 
         end do  ! ibz
 
@@ -264,14 +267,17 @@ module exciton_envelopes
 
     write(*,*) '   Evaluating exciton envelope function derivative with respect to k...'
 
-    !$omp parallel do collapse(2) schedule(dynamic) &
+    !$omp parallel do collapse(2) default(none) schedule(dynamic) &
     !$omp private(j, nn, ibz, nj, j_aux, &
     !$omp         rkxp, rkyp, rkzp, &
     !$omp         rk1, rk2, rk3, &
     !$omp         rkxp_bz, rkyp_bz, rkzp_bz, &
     !$omp         rk1_bz, rk2_bz, rk3_bz, &
     !$omp         fk_for, fk_back, &
-    !$omp         fk_ex_col, fk_der_col)
+    !$omp         fk_ex_col, fk_der_col) &
+    !$omp   shared(npointstotal, norb_ex_band, norb_ex_cut, ndim, g) &
+    !$omp   shared(fk_ex, fk_ex_der, active_x, active_y, active_z) &
+    !$omp   shared(rkxvector, rkyvector, rkzvector, rk1vector, rk2vector, rk3vector)
     do j = 1, norb_ex_band
       do nn = 1, norb_ex_cut
 
@@ -712,7 +718,7 @@ end subroutine get_fk_ex_k_interp_1d
       xc=(xp*(G(2,2)*G(3,3)-G(2,3)*G(3,2))+yp*(G(2,3)*G(3,1)-G(2,1)*G(3,3))+zp*(G(2,1)*G(3,2)-G(2,2)*G(3,1)))/det
       yc=(xp*(G(1,3)*G(3,2)-G(1,2)*G(3,3))+yp*(G(1,1)*G(3,3)-G(1,3)*G(3,1))+zp*(G(1,2)*G(3,1)-G(1,1)*G(3,2)))/det
       zc=(xp*(G(1,2)*G(2,3)-G(1,3)*G(2,2))+yp*(G(1,3)*G(2,1)-G(1,1)*G(2,3))+zp*(G(1,1)*G(2,2)-G(1,2)*G(2,1)))/det
-      
+
       xc_bz=xc-dble(int(xc/0.5d0)); yc_bz=yc-dble(int(yc/0.5d0)); zc_bz=zc-dble(int(zc/0.5d0))
       xp_bz=xc_bz*G(1,1)+yc_bz*G(2,1)+zc_bz*G(3,1)
       yp_bz=xc_bz*G(1,2)+yc_bz*G(2,2)+zc_bz*G(3,2)

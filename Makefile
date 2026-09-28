@@ -79,7 +79,6 @@ $(TARGET): $(OBJ_MODULES) $(OBJ_MAIN)
 $(BINDIR)/opticx.o: $(SRC_MAIN) | $(BINDIR) $(BUILDDIR)
 	$(FC) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@
 
-
 # -----------------------------------------------------------------
 # Module dependencies
 # -----------------------------------------------------------------
@@ -172,6 +171,29 @@ $(BINDIR)/test_shift_intens_ex_matrix: $(OBJ_MODULES) $(BINDIR)/test_shift_inten
 
 $(BINDIR)/test_shift_intens_ex_matrix.o: tests/test_shift_intens_ex_matrix.f90 | $(BUILDDIR) $(BINDIR)
 	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
+
+test_shift_real_data: $(BINDIR)/test_shift_real_data
+
+$(BINDIR)/test_shift_real_data: $(OBJ_MODULES) $(BINDIR)/test_shift_real_data.o
+	$(FC) $(FFLAGS) $(OBJ_MODULES) $(BINDIR)/test_shift_real_data.o -o $@ $(LIBS)
+
+$(BINDIR)/test_shift_real_data.o: tests/test_shift_real_data.f90 | $(BUILDDIR) $(BINDIR)
+	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
+
+# Runs the real-data shift-current test in bin/test_run_shift (the pipeline writes output files into the cwd)
+run_test_shift_real: $(BINDIR)/test_shift_real_data
+	mkdir -p $(BINDIR)/test_run_shift
+	sed 's|@ROOT@|$(CURDIR)|g' tests/test_shift_real_data.in > $(BINDIR)/test_run_shift/in.txt
+	cd $(BINDIR)/test_run_shift && ../test_shift_real_data in.txt
+	-python3 tools/plot_test_outputs.py $(BINDIR)/test_run_shift/shift_real_data_spectra.dat
+
+# Regression check of the single-particle shift (sp vs exact IPA and vs the excitonic IPA limit on non-interacting hBN)
+check_sp_shift: $(TARGET)
+	python3 tools/check_sp_shift.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_sp_shift
+
+# Cache_ome_ex: the five modes, asserting both behaviour and what the run says about itself (8.44/8.45)
+check_ome_cache: $(TARGET)
+	python3 tools/check_ome_cache.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_ome_cache
 
 # -----------------------------------------------------------------
 # Clean

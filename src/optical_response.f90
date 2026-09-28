@@ -44,23 +44,13 @@ module optical_response
         call get_sigma_second_ex(nwp,nwq) 
       end if
     end if
-    if (response_text  == 'shg') then
-      write(*,*) '    Optical response: shg susceptibility' 
-      nwp=1
-      nwq=1
-      call get_sigma_second_sp(nwp,nwq) 
-      if (iflag_xatu .eqv. .true.) then
-        call get_sigma_second_ex(nwp,nwq) 
-      end if
-    end if
-    if (response_text  == 'electrooptic') then
-      write(*,*) '   Optical response: electro-optic susceptibility'
-      nwp=1
-      nwq=0
-      call get_sigma_second_sp(nwp,nwq) 
-      if (iflag_xatu .eqv. .true.) then
-        call get_sigma_second_ex(nwp,nwq) 
-      end if
+    if (response_text /= 'none' .and. response_text /= 'absorbance' .and. &
+        response_text /= 'shift_sumrule' .and. response_text /= 'shift_shiftvector' .and. &
+        response_text /= 'shift_gender') then
+      write(*,*) 'ERROR (optical_response): unknown Response = "'//trim(response_text)//'".'
+      write(*,*) '       Valid: none, absorbance, shift_sumrule, shift_shiftvector, shift_gender.'
+      write(*,*) '       Note it is case sensitive. Nothing would have been computed; stopping.'
+      stop 1
     end if
     write(*,*) 'The optical response has been evaluated'
   end subroutine get_optical_response

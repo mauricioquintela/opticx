@@ -128,12 +128,18 @@ contains
       !I maintain the overlap matrix though
 
       !locate the (0,0,0) element of nRvec
+      nRzero=0
       do iR=1,nR
          if (nRvec(iR,1)==0 .and. nRvec(iR,2)==0 .and. nRvec(iR,3)==0) then
             nRzero=iR
             exit
          end if
       end do
+      if (nRzero==0) then
+         write(*,*) 'ERROR (parser_wannier90_tb): no R=(0,0,0) cell found in the _tb.dat file.'
+         write(*,*) '       A physical tight-binding Hamiltonian must include the on-site cell.'
+         stop 1
+      end if
       !wannier functions are orthonormal
       shop=0.0d0
       do ialpha=1,norb

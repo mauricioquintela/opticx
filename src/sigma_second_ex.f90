@@ -29,19 +29,33 @@ module sigma_second_ex
     end if
 
 
+
+
   end subroutine get_sigma_second_ex
 
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
+  ! Excitonic shift conductivity sigma^{abc}(0; omega, -omega).
+  ! Conventions (code paper, Esteve-Paredes et al., npj Comput. Mater. 11, 13, main Eqs. 8-11 and SI Note 5):
+  !  * omega_p = omega + i*eta, omega_q = -omega_p, omega_2 = 0 exactly; positive sign, sigma = +pi*e^3/(hbar V) *
+  !    sum Re[S_NN'] delta(hbar*omega - E_N) (Eq. 10);
+  !  * S -> Re[S] (SI Note 5: degenerate exciton pairs are not time-reversal eigenstates);
+  !  * the output is symmetrised over the field indices, sigma^{abc} -> (sigma^{abc} + sigma^{acb})/2. The
+  !    paper's IPA formula (Eq. 9) is written with I^{abc} + I^{acb}; the SI states that the real part is
+  !    symmetric under b<->c because the current must be real, and Eq. 8 contracts sigma with
+  !    eps_b eps_c, so only the b<->c-symmetric part enters for linearly polarised light. The
+  !    permutation symmetrisation of Taghizadeh 2017 (App. A) reduces to this at DC.
+  ! The real part of the result is printed.
   subroutine get_sigma_shift_ex()
     implicit none
     
 	!here
-	integer :: iw
+	integer :: iw, nj, njp, njpp
     dimension :: wp(nw)
     dimension :: sigma_w_ex(3,3,3,nw)
 
     real*8 :: wp,eta2
     complex*16 :: sigma_w_ex
+    complex(8), allocatable :: sigma_raw(:,:,:,:)   ! heap, not stack
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
     !initialize conductivity arrays
     
@@ -56,10 +70,22 @@ module sigma_second_ex
     end if
 !     call get_shift_intens_ex(wp,eta2,sigma_w_ex)
     call get_shift_intens_ex_matrix(wp,eta2,sigma_w_ex)
+    ! symmetrise over the field indices (b,c)
+    allocate(sigma_raw(3,3,3,nw))
+    sigma_raw = sigma_w_ex
+    do njpp = 1, 3
+      do njp = 1, 3
+        do nj = 1, 3
+          sigma_w_ex(nj,njp,njpp,:) = 0.5d0*(sigma_raw(nj,njp,njpp,:) + sigma_raw(nj,njpp,njp,:))
+        end do
+      end do
+    end do
+    deallocate(sigma_raw)
 	!print shift conductivity (ex)
 	call print_sigma_second_ex(nw,wp,sigma_w_ex)
     write(*,*) '    Shift conductivity (ex) has been printed'
   end subroutine get_sigma_shift_ex
+
 
 
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
@@ -113,7 +139,7 @@ module sigma_second_ex
 
             if (mode == 1) then
               sigma_w_ex_t(nj,njp,njpp,:) = sigma_w_ex_t(nj,njp,njpp,:) &
-                - ( s1*(-cmplx(0.0d0,1.0d0,8)*pi*d1_arr(:)) &
+                + ( s1*(-cmplx(0.0d0,1.0d0,8)*pi*d1_arr(:)) &
                   + s2*(-cmplx(0.0d0,1.0d0,8)*pi*d2_arr(:)) &
                   + s3*(-pi**2*d3_arr(:)*d4_arr(:)) ) &
                   / (dble(npointstotal) * vcell)
@@ -143,6 +169,15 @@ end subroutine get_shift_intens_ex
   !!!!!!!
   
   
+!> Excitonic shift conductivity, zgemm-restructured form of get_shift_intens_ex.
+!! Identical arithmetic (the two agree to 1e-16 in both broadening modes; guarded by
+!! tests/test_shift_intens_ex_matrix.f90), but the (n,m) double sum becomes a matrix
+!! product over the exciton index, which took the target run from ~2 h to ~19 min.
+!! Frequencies are processed in chunks of nw_chunk to bound the workspace.
+!! @param wp      Frequency grid, Hartree.
+!! @param eta2    Broadening, Hartree.
+!! @param sigma_w_ex  Accumulated onto, symmetrised over (b,c) by the caller.
+!! @return void
 subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
   implicit none
 
@@ -170,6 +205,7 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
   complex(8), allocatable :: Avec1(:), Avec2(:), Avec3(:), Avec4(:)
   complex(8), allocatable :: Amat(:,:), Amat2(:,:)
   complex(8), allocatable :: term_total(:)
+  complex(8), allocatable :: PiV(:)      ! Pi_n^a = -i E_n X_n^a, rebuilt per Cartesian index
 
   if (trim(broadening_type_text) == 'gaussian') then
     mode = 1
@@ -186,7 +222,7 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
   allocate(Wmat3(norb_ex_cut,nw_chunk), Wmat4(norb_ex_cut,nw_chunk))
   allocate(Avec1(norb_ex_cut), Avec2(norb_ex_cut), Avec3(norb_ex_cut), Avec4(norb_ex_cut))
   allocate(Amat(norb_ex_cut,nw_chunk), Amat2(norb_ex_cut,nw_chunk))
-  allocate(term_total(nw_chunk))
+  allocate(term_total(nw_chunk), PiV(norb_ex_cut))
 
   if (mode == 1) then
     allocate(gauss1(norb_ex_cut,nw_chunk), gauss2(norb_ex_cut,nw_chunk))
@@ -197,8 +233,8 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
     allocate(Bfac1(norb_ex_cut,nw_chunk), Bfac2(norb_ex_cut,nw_chunk))
     !allocate(Cfac3(norb_ex_cut,nw_chunk), Dfac3(norb_ex_cut,nw_chunk))
     allocate(Dfac3(norb_ex_cut,nw_chunk))
-    Afac1(:) = 1.0d0/(-e_ex(:)+cmplx(0.0d0,eta2,8))
-    Afac2(:) = 1.0d0/( e_ex(:)+cmplx(0.0d0,eta2,8))
+    Afac1(:) = 1.0d0/(-e_ex(:))      ! omega_2 = 0 exactly: no eta on the omega_2 pole
+    Afac2(:) = 1.0d0/( e_ex(:))
   end if
 
   nchunks = (nw + nw_chunk - 1) / nw_chunk
@@ -221,8 +257,9 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
       end do
     else
       do nn = 1, norb_ex_cut
-        Bfac1(nn,1:nw_this) = 1.0d0/(-wp(iw0:iw1)-e_ex(nn)+cmplx(0.0d0,eta2,8))
-        Bfac2(nn,1:nw_this) = 1.0d0/(-wp(iw0:iw1)+e_ex(nn)+cmplx(0.0d0,eta2,8))
+        ! omega_q = -(omega + i*eta): all poles carry z = omega + i*eta (see get_shift_kernel_ex_dfactors)
+        Bfac1(nn,1:nw_this) = 1.0d0/(-wp(iw0:iw1)-e_ex(nn)-cmplx(0.0d0,eta2,8))
+        Bfac2(nn,1:nw_this) = 1.0d0/(-wp(iw0:iw1)+e_ex(nn)-cmplx(0.0d0,eta2,8))
         Dfac3(nn,1:nw_this) = 1.0d0/( wp(iw0:iw1)-e_ex(nn)+cmplx(0.0d0,eta2,8))
         !Cfac3(nn,1:nw_this) = 1.0d0/( e_ex(nn)-wp(iw0:iw1)+cmplx(0.0d0,eta2,8)) !entirely identical to Bfac2
       end do
@@ -249,12 +286,13 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
                       Bmat2, norb_ex_cut, czero, Wmat2, norb_ex_cut)
 
           do nj = 1, 3
-            Avec1(:) = -vme_ex(nj,:) / e_ex(:)
-            Avec2(:) = conjg(vme_ex(nj,:)) / e_ex(:)
+            ! Pi_n = -i E_n X_n  =>  -Pi_n/E_n = i X_n  and  conj(Pi_n)/E_n = i X_n^*
+            Avec1(:) = ci*xme_ex(nj,:)
+            Avec2(:) = ci*conjg(xme_ex(nj,:))
             term_total(1:nw_this) = matmul(Avec1, Wmat1(:,1:nw_this)) &
                                    + matmul(Avec2, Wmat2(:,1:nw_this))
             sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
-                - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+                + term_total(1:nw_this) / (dble(npointstotal)*vcell)
           end do
 
         else   ! lorentzian
@@ -277,14 +315,16 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
                       Bmat4, norb_ex_cut, czero, Wmat4, norb_ex_cut)
 
           do nj = 1, 3
-            Avec1(:) = vme_ex(nj,:)        * Afac1(:)   ! term1, A
-            Avec2(:) = conjg(vme_ex(nj,:)) * Afac1(:)   ! term1, A*
-            Avec3(:) = conjg(vme_ex(nj,:)) * Afac2(:)   ! term2, A
-            Avec4(:) = vme_ex(nj,:)        * Afac2(:)   ! term2, A*
+            PiV(:)   = -ci*e_ex(:)*xme_ex(nj,:)          ! Pi_n^a = -i E_n X_n^a
+            Avec1(:) = PiV(:)        * Afac1(:)   ! term1, A
+            Avec2(:) = conjg(PiV(:)) * Afac1(:)   ! term1, A*
+            Avec3(:) = conjg(PiV(:)) * Afac2(:)   ! term2, A
+            Avec4(:) = PiV(:)        * Afac2(:)   ! term2, A*
 
+            ! (s - s*)/2 = i*Im(s): the S -> Re[S] projection (see get_shift_kernel_ex_static)
             term_total(1:nw_this) = &
                 ( matmul(Avec1, Wmat1(:,1:nw_this)) - matmul(Avec2, Wmat2(:,1:nw_this)) &
-                + matmul(Avec3, Wmat3(:,1:nw_this)) - matmul(Avec4, Wmat4(:,1:nw_this)) ) / (2.0d0*ci)
+                + matmul(Avec3, Wmat3(:,1:nw_this)) - matmul(Avec4, Wmat4(:,1:nw_this)) ) / 2.0d0
 
             sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
                 - term_total(1:nw_this) / (dble(npointstotal)*vcell)
@@ -305,7 +345,9 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
           do nnp = 1, norb_ex_cut
             Bmat1(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) * gauss4(nnp,1:nw_this)
           end do
-          Mmat1 = vme_ex_inter(nj,:,:)
+          do nnp = 1, norb_ex_cut
+            Mmat1(:,nnp) = ci*(e_ex(:)-e_ex(nnp))*xme_ex_inter(nj,:,nnp)   ! Pi_nm = i (E_n-E_m) X_nm
+          end do
           call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat1, norb_ex_cut, &
                       Bmat1, norb_ex_cut, czero, Wmat1, norb_ex_cut)
 
@@ -316,7 +358,7 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
             end do
             term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat1(:,1:nw_this), dim=1)
             sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
-                - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+                + term_total(1:nw_this) / (dble(npointstotal)*vcell)
           end do
 
         else   ! lorentzian
@@ -324,7 +366,9 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
             Bmat1(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) * Dfac3(nnp,1:nw_this)
             Bmat2(nnp,1:nw_this) = xme_ex(njpp,nnp)        * Dfac3(nnp,1:nw_this)
           end do
-          Mmat1 = vme_ex_inter(nj,:,:)
+          do nnp = 1, norb_ex_cut
+            Mmat1(:,nnp) = ci*(e_ex(:)-e_ex(nnp))*xme_ex_inter(nj,:,nnp)   ! Pi_nm = i (E_n-E_m) X_nm
+          end do
           Mmat2 = conjg(Mmat1)
 
           call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat1, norb_ex_cut, &
@@ -341,7 +385,7 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
             end do
             term_total(1:nw_this) = &
                 ( sum(Amat(:,1:nw_this)*Wmat1(:,1:nw_this), dim=1) &
-                - sum(Amat2(:,1:nw_this)*Wmat2(:,1:nw_this), dim=1) ) / (2.0d0*ci)
+                - sum(Amat2(:,1:nw_this)*Wmat2(:,1:nw_this), dim=1) ) / 2.0d0
             sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
                 - term_total(1:nw_this) / (dble(npointstotal)*vcell)
           end do
@@ -361,38 +405,64 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
   end if
   deallocate(Mmat1, Mmat2, Bmat1, Bmat2, Bmat3, Bmat4)
   deallocate(Wmat1, Wmat2, Wmat3, Wmat4)
-  deallocate(Avec1, Avec2, Avec3, Avec4, Amat, Amat2, term_total)
+  deallocate(Avec1, Avec2, Avec3, Avec4, Amat, Amat2, term_total, PiV)
 
 end subroutine get_shift_intens_ex_matrix
   
   !!!!
   
   ! Frequency-independent part: s1, s2, s3 only.
+  ! Frequency-independent matrix-element products of the excitonic shift conductivity
+  ! (Esteve-Paredes et al., npj Comput. Mater. 11, 13, SI Eq. 9), written with POSITION matrix
+  ! elements only (equivalent to method B of Taghizadeh & Pedersen, PRB 97, 205432):
+  !   V_0N  -> Pi_n  = -i E_n X_n        (Heisenberg momentum, NOT the bare momentum in vme_ex)
+  !   V_NN' -> Pi_nm =  i (E_n - E_m) X_nm
+  ! (the SI uses exactly these identities to reduce Eq. 9 to the position-only Eq. 10).
+  ! Under time reversal s1,s2,s3 are purely imaginary (s = -i E S with S real). In the
+  ! lorentzian branch only the imaginary part of s is kept, as i*Im(s), i.e. S -> Re[S] (the
+  ! SI's prescription); multiplied by the complex pole factor this gives the absorptive
+  ! (delta-like) line shape when the real part is printed. The gaussian branch, which
+  ! multiplies by -i*pi*delta, needs no projection.
+  !> The frequency-INDEPENDENT factors of the three terms of the excitonic shift kernel,
+  !! i.e. Eq. (B1a) of Taghizadeh & Pedersen, PRB 97, 205432 (2018) with Pi built from X
+  !! (Pi_n = -i E_n X_n, Pi_nm = i(E_n - E_m) X_nm) -- the identities the code paper's SI
+  !! uses to get its Eq. (10) from Eq. (9).
+  !! In the Lorentzian branch only i*Im(s) is kept: the S -> Re[S] projection of SI Note 5,
+  !! which is what makes the line shape absorptive rather than dispersive.
+  !! Split out from the frequency loop because these depend only on (n,m) and the Cartesian
+  !! triple, so they are evaluated once per exciton pair instead of once per frequency.
+  !! @param mode              1 = gaussian, 2 = lorentzian.
+  !! @param nj, njp, njpp     Cartesian indices a, b, c.
+  !! @param nn, nnp           Exciton indices n, m.
+  !! @param s1, s2, s3        The three static factors.
+  !! @return void
   subroutine get_shift_kernel_ex_static(mode, nj, njp, njpp, nn, nnp, s1, s2, s3)
     implicit none
     integer,    intent(in)  :: mode, nj, njp, njpp, nn, nnp
     complex(8), intent(out) :: s1, s2, s3
     integer :: nj1, nj2, nj3
+    complex(8), parameter :: ci = (0.0d0,1.0d0)
+    complex(8) :: pi_n, pi_nm
 
     nj1 = nj; nj2 = njp; nj3 = njpp
 
+    pi_n  = -ci*e_ex(nn)*xme_ex(nj1,nn)                                  ! Pi_n^a = -i E_n X_n^a
+    pi_nm =  ci*(e_ex(nn)-e_ex(nnp))*xme_ex_inter(nj1,nn,nnp)            ! Pi_nm^a = i (E_n-E_m) X_nm^a
+
     if (mode == 1) then   ! gaussian
-      s1 = -vme_ex(nj1,nn)/e_ex(nn) * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))         ! a→V_0N, b→R_NN' — matches term1
-      s2 =  conjg(vme_ex(nj1,nn))/e_ex(nn) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)  ! matches term2
-!       s3 = -xme_ex(nj1,nn) * vme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))                ! a→R_0N, b→V_NN'  ← WRONG
-      s3 = -xme_ex(nj2,nn) * vme_ex_inter(nj1,nn,nnp) * conjg(xme_ex(nj3,nnp))
-      
+      s1 = -pi_n/e_ex(nn) * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))         ! a→V_0N, b→R_NN'
+      s2 =  conjg(pi_n)/e_ex(nn) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)
+      s3 = -xme_ex(nj2,nn) * pi_nm * conjg(xme_ex(nj3,nnp))
+
     else                    ! lorentzian
-      s1 = vme_ex(nj1,nn) * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))         ! a→V_0N, b→R_NN' — matches term1
-      s2 = conjg(vme_ex(nj1,nn)) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)  ! matches term2
-!       s3 = -xme_ex(nj1,nn) * vme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))      ! a→R_0N, b→V_NN'  ← WRONG
-      s3 = -xme_ex(nj2,nn) * vme_ex_inter(nj1,nn,nnp) * conjg(xme_ex(nj3,nnp))
-      ! PATCH: the lorentzian mode's real-part transform (cmplx(aimag(s),0))
-      ! is also frequency-independent, so it's folded in here rather than
-      ! redone inside the iw loop.
-      s1 = cmplx(aimag(s1), 0.0d0, 8)
-      s2 = cmplx(aimag(s2), 0.0d0, 8)
-      s3 = cmplx(aimag(s3), 0.0d0, 8)
+      s1 = pi_n * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
+      s2 = conjg(pi_n) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)
+      s3 = -xme_ex(nj2,nn) * pi_nm * conjg(xme_ex(nj3,nnp))
+      ! keep only i*Im(s)  (= (s - s*)/2): the S -> Re[S] projection; frequency-independent,
+      ! so it is folded in here rather than redone inside the iw loop.
+      s1 = cmplx(0.0d0, aimag(s1), 8)
+      s2 = cmplx(0.0d0, aimag(s2), 8)
+      s3 = cmplx(0.0d0, aimag(s3), 8)
     end if
   end subroutine get_shift_kernel_ex_static
   
@@ -409,9 +479,13 @@ end subroutine get_shift_intens_ex_matrix
     d3(:) = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(-wp(:)+e_ex(nn))**2)
     d4(:) = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(wp(:)-e_ex(nnp))**2)
   else                    ! lorentzian
-    d1(:) = 1.0d0 / ( (-e_ex(nn)+cmplx(0.0d0,eta2,8)) * (-wp(:)-e_ex(nnp)+cmplx(0.0d0,eta2,8)) )
-    d2(:) = 1.0d0 / ( ( e_ex(nn)+cmplx(0.0d0,eta2,8)) * (-wp(:)+e_ex(nnp)+cmplx(0.0d0,eta2,8)) )
-    d3(:) = 1.0d0 / ( ( e_ex(nn)-wp(:)+cmplx(0.0d0,eta2,8)) * ( wp(:)-e_ex(nnp)+cmplx(0.0d0,eta2,8)) )
+    ! DC shift, paper convention: omega_p = omega + i*eta, omega_q = -omega_p, so omega_2 = 0
+    ! EXACTLY (no eta on omega_2) and every pole carries the same complex frequency z = omega + i*eta:
+    ! (omega_q -+ E) = -(z +- E). This makes term 3 vanish under time reversal (d3 symmetric under
+    ! n <-> n') and gives +pi*sum Re[S]*delta_eta(omega-E_N), the sign of Eq. (10) of the code paper.
+    d1(:) = 1.0d0 / ( cmplx(-e_ex(nn),0.0d0,8) * (-wp(:)-e_ex(nnp)-cmplx(0.0d0,eta2,8)) )
+    d2(:) = 1.0d0 / ( cmplx( e_ex(nn),0.0d0,8) * (-wp(:)+e_ex(nnp)-cmplx(0.0d0,eta2,8)) )
+    d3(:) = 1.0d0 / ( ( e_ex(nn)-wp(:)-cmplx(0.0d0,eta2,8)) * ( wp(:)-e_ex(nnp)+cmplx(0.0d0,eta2,8)) )
     d4(:) = (0.0d0, 0.0d0)   ! unused in lorentzian mode; present only so the interface is uniform
   end if
 
@@ -433,176 +507,44 @@ subroutine get_shift_kernel_ex_freq(mode, eta2, omegap, omegaq, omega2, &
     d3 = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(omegaq+e_ex(nn))**2)
     d4 = 1.0d0/eta2 * 1.0d0/sqrt(2.0d0*pi) * exp(-0.5d0/(eta2**2)*(omegap-e_ex(nnp))**2)
 
+    ! sign chosen so that the resonant term is +pi*Re[S]*delta (paper Eq. 10); the lorentzian
+    ! branch gets the same sign from omega_q = -omega_p - i*eta (see get_shift_kernel_ex_dfactors)
     aux1 = s1 * (-complex(0.0d0,1.0d0)*pi*d1)
     aux2 = s2 * (-complex(0.0d0,1.0d0)*pi*d2)
     aux3 = s3 * (-pi**2*d3*d4)
-    shift_kernel_ex = -(aux1+aux2+aux3)
+    shift_kernel_ex = +(aux1+aux2+aux3)
   else                    ! lorentzian
-    d1 = 1.0d0 / ((omega2-e_ex(nn) +cmplx(0.0d0,eta2,8)) * (omegaq-e_ex(nnp)+cmplx(0.0d0,eta2,8)))
-    d2 = 1.0d0 / ((omega2+e_ex(nn) +cmplx(0.0d0,eta2,8)) * (omegaq+e_ex(nnp)+cmplx(0.0d0,eta2,8)))
-    ! d3/aux3 intentionally not computed: same as the original, aux3 was
-    ! excluded from the final sum (`shift_kernel_ex=-(aux1+aux2)`).
-    ! now computed
-    d3 = 1.0d0 / ((e_ex(nn)-omegap +cmplx(0.0d0,eta2,8)) * (omegap-e_ex(nnp)+cmplx(0.0d0,eta2,8)))
-    
+    ! omega_p = omegap + i*eta, omega_q = -omega_p (needs omegaq = -omegap), omega_2 = omega2 = 0 exactly
+    d1 = 1.0d0 / ((omega2-e_ex(nn)) * (omegaq-e_ex(nnp)-cmplx(0.0d0,eta2,8)))
+    d2 = 1.0d0 / ((omega2+e_ex(nn)) * (omegaq+e_ex(nnp)-cmplx(0.0d0,eta2,8)))
+    d3 = 1.0d0 / ((omegaq+e_ex(nn)-cmplx(0.0d0,eta2,8)) * (omegap-e_ex(nnp)+cmplx(0.0d0,eta2,8)))
+
     aux1 = s1 * d1
     aux2 = s2 * d2
-    aux3 = s3 * d3                                                                                    ! <-- added
+    aux3 = s3 * d3
     shift_kernel_ex = -(aux1+aux2+aux3)
   end if
 
 end subroutine get_shift_kernel_ex_freq
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!   subroutine get_shift_kernel_ex(eta2, nj, njp, njpp, nn, nnp, &
-!                                   omegap, omegaq, omega2, shift_kernel_ex)
-!     implicit none
-! 
-!     integer,    intent(in)  :: nj, njp, njpp, nn, nnp
-!     real(8),    intent(in)  :: eta2, omegap, omegaq, omega2
-!     complex(8), intent(out) :: shift_kernel_ex
-! 
-!     integer    :: isym, ilorentzian, ihuang, imine
-!     integer    :: nj1, nj2, nj3
-!     complex(8) :: omegaq_c, omegap_q, omega2_c
-!     complex(8) :: s1, s2, s3, eta2p
-!     complex(8) :: aux1, aux2, aux3, aux4, aux5, aux6
-!     complex(8) :: d1, d2, d3, d4, d5, d6, d7, d8
-! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! 
-!     isym = 0
-!     if (isym .eq. 0) then
-!       nj1 = nj
-!       nj2 = njp
-!       nj3 = njpp
-! 
-!       if (trim(broadening_type_text) == 'gaussian') then
-!         imine       = 1
-!         ilorentzian = 0
-!       else if (trim(broadening_type_text) == 'lorentzian') then
-!         imine       = 0
-!         ilorentzian = 1
-!       else
-!         imine       = 1
-!         ilorentzian = 0
-!       end if
-! 
-!       ihuang = 0
-! 
-!       if (imine .eq. 1) then
-! 
-!         d1=1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(omegaq-e_ex(nnp))**2)
-!         d2=1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(omegaq+e_ex(nnp))**2)
-!         d3=1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(omegaq+e_ex(nn))**2)
-!         d4=1.0d0/eta2*1.0d0/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(omegap-e_ex(nnp))**2)
-! 
-!         !First version: 2023. WORKING
-!         s1=-vme_ex(nj1,nn)/e_ex(nn)*xme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp))   
-!         s2=conjg(vme_ex(nj1,nn))/e_ex(nn)*conjg(xme_ex_inter(nj2,nn,nnp))*xme_ex(nj3,nnp)
-!         s3=-xme_ex(nj1,nn)*vme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp)) 
-! 
-!         aux1=s1*(-complex(0.0d0,1.0d0)*pi*d1)
-!         aux2=s2*(-complex(0.0d0,1.0d0)*pi*d2)
-!         aux3=s3*(-pi**2*d3*d4)
-! 
-!         shift_kernel_ex=-(aux1+aux2+aux3)
-!         !s_kernel=-(aux1+aux2) !+aux3)
-!         !s_kernel=-aux2 !+aux3)
-! 
-!         !full R. WORKING
-!         !s1=xme_ex(nj1,nn)*xme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp))
-!         !s2=conjg(xme_ex(nj1,nn))*conjg(xme_ex_inter(nj2,nn,nnp))*xme_ex(nj3,nnp)
-!         !s3=-xme_ex(nj1,nn)*vme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp))
-!         !s3=-xme_ex(nj1,nn)*vme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp))
-!         !aux1=s1*(pi*d1)
-!         !aux2=s2*(pi*d2)
-!         !aux3=s3*(-pi**2*d3*d4)
-!         !s_kernel=-(aux1+aux2)
-! 
-!         !full V
-!         !s1=(complex(0.0d0,1.0d0)*vme_ex(nj1,nn)/e_ex(nn))*xme_ex_inter(nj2,nn,nnp) &
-!         !*(-complex(0.0d0,1.0d0)*conjg(vme_ex(nj3,nn))/e_ex(nn))
-!         !s2=(-complex(0.0d0,1.0d0)*conjg(vme_ex(nj1,nn))/e_ex(nn))*conjg(xme_ex_inter(nj2,nn,nnp)) &
-!         !*(complex(0.0d0,1.0d0)*vme_ex(nj3,nnp)/e_ex(nnp))
-!         !s3=-xme_ex(nj1,nn)*vme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp))
-!         !aux1=s1*(pi*d1)
-!         !aux2=s2*(pi*d2)
-!         !aux3=s3*(-pi**2*d3*d4)
-!         !shift_kernel_ex=-(aux2)
-!             
-!         !s1=-vme_ex(nj1,nn)/e_ex(nn)*vme_ex_inter(nj2,nn,nnp)*conjg(vme_ex(nj3,nnp))
-!         !s2=conjg(vme_ex(nj1,nn))/e_ex(nn)*conjg(vme_ex_inter(nj2,nn,nnp))*vme_ex(nj3,nnp)
-!         !s3=-vme_ex(nj1,nn)*vme_ex_inter(nj2,nn,nnp)*conjg(vme_ex(nj3,nnp))
-! 
-!         !s1=-1.0d0/omegap**2*vme_ex(nj1,nn)*vme_ex_inter(nj2,nn,nnp)*conjg(vme_ex(nj3,nnp))   
-!         !s2=-1.0d0/omegap**2*conjg(vme_ex(nj1,nn))*conjg(vme_ex_inter(nj2,nn,nnp))*vme_ex(nj3,nnp)
-!         !s1=-vme_ex(nj1,nn)/e_ex(nn)*xme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp))
-!         !s2=conjg(vme_ex(nj1,nn))/e_ex(nn)*conjg(vme_ex_inter(nj2,nn,nnp))*xme_ex(nj3,nnp)
-!         !s3=+1.0d0/omegap**2*vme_ex(nj1,nn)*vme_ex_inter(nj2,nn,nnp)*conjg(vme_ex(nj3,nnp))
-!       end if
-!       
-!       !Taghizadeh 2018 with broadening (10.1103/PhysRevB.97.205432)
-!       !tag and pedersen B1a
-!       if (ilorentzian .eq. 1) then
-!         d1 = 1.0d0 / ((omega2-e_ex(nn) +cmplx(0.0d0,eta2,8)) * (omegaq-e_ex(nnp)+cmplx(0.0d0,eta2,8)))
-!         d2 = 1.0d0 / ((omega2+e_ex(nn) +cmplx(0.0d0,eta2,8)) * (omegaq+e_ex(nnp)+cmplx(0.0d0,eta2,8)))
-!         !d3 = 1.0d0 / ((omegaq+e_ex(nn) +cmplx(0.0d0,eta2,8)) * (omegap-e_ex(nnp)+cmplx(0.0d0,eta2,8)))
-! 
-!         s1 = vme_ex(nj1,nn)        * xme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
-!         s2 = conjg(vme_ex(nj1,nn)) * conjg(xme_ex_inter(nj2,nn,nnp)) * xme_ex(nj3,nnp)
-!         !s3 = -xme_ex(nj1,nn)       * vme_ex_inter(nj2,nn,nnp) * conjg(xme_ex(nj3,nnp))
-! 
-!         s1 = cmplx(aimag(s1), 0.0d0, 8)
-!         s2 = cmplx(aimag(s2), 0.0d0, 8)
-!         !s3 = cmplx(aimag(s3), 0.0d0, 8)
-! 
-!         aux1 = s1 * d1
-!         aux2 = s2 * d2
-!         !aux3 = s3 * d3
-!         
-!         !s_kernel=-(aux1+aux2+aux3)
-!         shift_kernel_ex=-(aux1+aux2) !+aux3)
-!         
-!         !s_kernel=-aimag((aux1+aux2))
-!         !Louie .eq. tag and pedersen B1b
-!         !d1=1.0d0/((omega2-e_ex(nn)+complex(0.0d0,eta2))*(omegaq-e_ex(nnp)+complex(0.0d0,eta2)))
-!         !d2=1.0d0/((omega2+e_ex(nn)+complex(0.0d0,eta2))*(omegaq+e_ex(nnp)+complex(0.0d0,eta2)))
-!         !d3=1.0d0/((omegaq+e_ex(nn)+complex(0.0d0,eta2))*(omegap-e_ex(nnp)+complex(0.0d0,eta2)))
-!         !s1=xme_ex(nj1,nn)*xme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp))   
-!         !s2=conjg(xme_ex(nj1,nn))*conjg(xme_ex_inter(nj2,nn,nnp))*xme_ex(nj3,nnp)
-!         !s3=-xme_ex(nj1,nn)*xme_ex_inter(nj2,nn,nnp)*conjg(xme_ex(nj3,nnp)) 
-!         !aux1=s1*d1		  
-!         !aux2=s2*d2
-!         !aux3=s3*d3
-!         !s_kernel=aux1+aux2+aux3
-!       end if
-! 
-!       if (ihuang .eq. 1) then
-!         d1 = 1.0d0 / (omegap + e_ex(nnp) + eta2)
-!         d2 = 1.0d0 / (omegap - e_ex(nnp) + eta2)
-!         d3 = 1.0d0 / (omegap - e_ex(nn)  + eta2)
-!         d4 = 1.0d0 / (omegap - e_ex(nnp) + eta2)
-!         d5 = 1.0d0 / (-omegap + e_ex(nnp) - eta2)
-!         d6 = 1.0d0 / (-omegap - e_ex(nnp) + eta2)
-!         d7 = 1.0d0 / (-omegap - e_ex(nn)  + eta2)
-!         d8 = 1.0d0 / (-omegap - e_ex(nnp) + eta2)
-! 
-!         aux1 =  cmplx(0.0d0,1.0d0,8)*xme_ex(nj1,nn)*conjg(xme_ex_inter(nj2,nn,nnp))*conjg(xme_ex(nj3,nnp))*d1
-!         aux2 =  cmplx(0.0d0,1.0d0,8)*conjg(xme_ex(nj1,nn))*xme_ex_inter(nj2,nn,nnp)*xme_ex(nj3,nnp)*d2
-!         aux3 = -xme_ex(nj2,nn)*vme_ex_inter(nj1,nn,nnp)*conjg(xme_ex(nj3,nnp))*d3*d4
-! 
-!         !b<--->c and \omega<---->-\omega
-!         aux4 =  cmplx(0.0d0,1.0d0,8)*xme_ex(nj1,nn)*conjg(xme_ex_inter(nj3,nn,nnp))*conjg(xme_ex(nj2,nnp))*d5
-!         aux5 =  cmplx(0.0d0,1.0d0,8)*conjg(xme_ex(nj1,nn))*xme_ex_inter(nj3,nn,nnp)*xme_ex(nj2,nnp)*d6
-!         aux6 = -xme_ex(nj3,nn)*vme_ex_inter(nj3,nn,nnp)*conjg(xme_ex(nj2,nnp))*d7*d8
-! 
-!         !s_kernel=(aux1+aux2+aux3+aux4+aux5+aux6)	
-!         shift_kernel_ex = -(aux1 + aux2 + aux3 + aux4 + aux5 + aux6)
-!       end if
-! 
-!     end if
-! 
-!   end subroutine get_shift_kernel_ex
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+! SHG 
+
+
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+
+
+
+
+
+
+
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine print_sigma_second_ex(nw, wp, sigma_w_ex)
@@ -624,9 +566,10 @@ end subroutine get_shift_kernel_ex_freq
    
     open(90, file='shift_ex_lengthgauge_'//trim(material_name)//'.dat')
 
-    !$omp parallel do schedule(static) ordered private(iw)
+    ! serial on purpose (audit 2026-09-24): this loop is pure file I/O and every iteration was
+    ! inside !$omp ordered, which serialises it completely -- the parallel wrapper only added
+    ! thread spawn and synchronisation cost. HANDOFF 8.35.
     do iw = 1, nw
-      !$omp ordered
       write(90,*) wp(iw)*27.211385d0, &
         realpart(feps*sigma_w_ex(1,1,1,iw)), realpart(feps*sigma_w_ex(1,1,2,iw)), &
         realpart(feps*sigma_w_ex(1,1,3,iw)), realpart(feps*sigma_w_ex(1,2,1,iw)), &
@@ -642,15 +585,49 @@ end subroutine get_shift_kernel_ex_freq
         realpart(feps*sigma_w_ex(3,2,2,iw)), realpart(feps*sigma_w_ex(3,2,3,iw)), &
         realpart(feps*sigma_w_ex(3,3,1,iw)), realpart(feps*sigma_w_ex(3,3,2,iw)), &
         realpart(feps*sigma_w_ex(3,3,3,iw))
-      !$omp end ordered
     end do
-    !$omp end parallel do
 
     close(90)
 
   end subroutine print_sigma_second_ex
 
+!!!!
+  ! Writes the excitonic SHG conductivity sigma^{abc}(2*omega; omega, omega) to
+  ! shg_ex_lengthgauge_<material>.dat.
+  ! Columns: hbar*omega (eV) -- the FUNDAMENTAL (driving) photon energy, NOT 2*hbar*omega --
+  ! then for a=x,y,z; b=x,y,z; c=x,y,z (c fastest): Re, Im.
+  ! AXIS CONVENTION CHANGED 2026-09-24 (HANDOFF 8.33), same change and same reasons as
+  ! print_shg_second_sp: a two-photon resonance of an exciton at energy E_N now appears at
+  ! hbar*omega = E_N/2, a one-photon resonance at hbar*omega = E_N. Files written before this
+  ! date carry the old 2*hbar*omega axis.
+  ! Units: uA*nm/V^2, same a.u. -> SI factor as the shift conductivity (both are 2D second-order
+  ! conductivities, j = sigma E E, and the kernel is in Hartree a.u.: X in Bohr, vcell in Bohr^2).
+  ! No spin degeneracy factor g is included, consistent with the rest of the code
+  ! (Taghizadeh & Pedersen's C_ee contains g = 2). The overall sign convention of e is not
+  ! examined here.
+  subroutine print_shg_second_ex(nw, wp, sigma_shg)
+    implicit none
+    integer,    intent(in) :: nw
+    real(8),    intent(in) :: wp(nw)
+    complex(8), intent(in) :: sigma_shg(3,3,3,nw)
+    integer :: iw, ia, ib, ic
+    real(8) :: feps
 
+    feps = (6.623618d-03)*(1.0d+06)*(27.211386d0**(-2))*(5.291772d-11)*(1.0d+09)
+
+    open(91, file='shg_ex_lengthgauge_'//trim(material_name)//'.dat')
+    write(91,'(A)') '# hbar*omega(eV) [FUNDAMENTAL, not 2*hbar*omega] | sigma^{abc}(2w;w,w) (Re, Im) in uA nm/V^2, abc = xxx,xxy,xxz,xyx,...,zzz'
+
+    do iw = 1, nw
+      write(91,'(ES18.10,54ES18.10)') wp(iw)*27.211385d0, &
+        ( ( ( real(feps*sigma_shg(ia,ib,ic,iw)), aimag(feps*sigma_shg(ia,ib,ic,iw)), &
+              ic=1,3 ), ib=1,3 ), ia=1,3 )
+    end do
+
+    close(91)
+
+  end subroutine print_shg_second_ex
+!!!!
 
 end module sigma_second_ex
 
