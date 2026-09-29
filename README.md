@@ -20,7 +20,7 @@ two-frequency response σ(ω₁+ω₂; ω₁, ω₂), which will soon be able to
 The theory behind the code, the conventions it follows and usage examples are described in the
 [documentation](#documentation). The implementation follows
 [Esteve-Paredes *et al.*, *npj Computational Materials* **11**, 13 (2025)](https://doi.org/10.1038/s41524-024-01504-2);
-if you find the code useful, please consider citing it.
+usage of the code requires citing the paper.
 
 ## Installation
 
