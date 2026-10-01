@@ -54,7 +54,6 @@ contains
          write(*,*) '2. Entering parser_wannier90_tb'
 
       ! === 1.  Use the path exactly as supplied ========================
-      !write(*,*) "MATERIAL NAME PARSED:", material_name_in
       file2open = trim(material_name_in)
 
       ! === 2.  Derive clean material name (no dir, no _tb.dat) =========

@@ -6,11 +6,14 @@ module ome_ex
     only: material_name, norb
   use parser_optics_xatu_dim, &
     only: npointstotal, vcell, &
-          norb_ex, norb_ex_cut, nv_ex, nc_ex, nband_ex, e_ex, fk_ex, &
+          norb_ex, norb_ex_cut, nv_ex, nc_ex, nband_ex, nband_index, e_ex, fk_ex, fk_ex_basis_ok, &
+          fk_ex_loaded, load_fk_ex, &
           get_ex_index_first, print_exciton_wf, &
           rkxvector, rkyvector, rkzvector
   use exciton_envelopes, &
     only: fk_ex_der, get_fk_ex_der_k
+  use ome_sp, &
+    only: rotate_fk_ex_to_a4_basis
   implicit none
   logical, save :: inter_terms_ready = .false.
 !   public :: inter_terms_ready
@@ -116,6 +119,36 @@ contains
       if (cache_hit) return
     end if
 
+    ! The cache did not supply the matrix elements, so the k-loop below will need the exciton
+    ! envelopes after all. get_exciton_data may have deferred reading them precisely because a hit was
+    ! possible (they cost 16.8 s on ReS2/2700); read them now, and carry them into the Eq. (A4) basis,
+    ! which the earlier call in ome.f90 skipped for the same reason. Both are no-ops if already done.
+    if (.not. fk_ex_loaded) then
+      call load_fk_ex()
+      call rotate_fk_ex_to_a4_basis()
+    end if
+
+    ! Everything past this point builds the excitonic matrix elements out of fk_ex, so fk_ex must be
+    ! in the same single-particle basis as vme_ex_band/ek. It is NOT when OME_sp = none: the Eq. (A4)
+    ! rotation matrices a4_W are rebuilt only inside get_ome_sp and are not stored in the .omesp file,
+    ! so rotate_fk_ex_to_a4_basis cannot run and leaves fk_ex in Xatu's basis. The two bases differ
+    ! inside every near-degenerate multiplet, and the error is O(1), not small: measured on In2Se3
+    ! (4 valence x 1 conduction) it moves the excitonic SHG by 13% of the largest tensor component and
+    ! by more than 100% of several smaller ones (HANDOFF 8.46). It used to be a warning that the run
+    ! ignored. Note the position: a cache hit returns above, so OME_sp = none REMAINS valid together
+    ! with Cache_ome_ex = read, which is the whole point of the cache -- the cached elements were
+    ! built in the rotated basis by the run that wrote them.
+    if (.not. fk_ex_basis_ok) then
+      write(*,*) ' ERROR (ome_ex): the exciton envelopes are not in the same basis as the'
+      write(*,*) '        single-particle matrix elements, so no excitonic quantity can be'
+      write(*,*) '        computed. Cause: OME_sp = none does not rebuild the Eq. (A4) rotation'
+      write(*,*) '        matrices (they are not stored in the .omesp file).'
+      write(*,*) '        Fix: set OME_sp = nonlinear (or = linear for OME_ex = linear), or keep'
+      write(*,*) '        OME_sp = none and supply a matching second-order cache with'
+      write(*,*) '        Cache_ome_ex = read.'
+      stop 1
+    end if
+
     ! iflag_norder==1 an unallocated read here was undefined behaviour.
     allocate(xme_ex_band(npointstotal, 3, nband_ex, nband_ex))
     xme_ex_band = (0.0d0, 0.0d0)
@@ -193,17 +226,13 @@ contains
     ! DEFAULT(NONE) added 2026-09-24 (audit): an unlisted variable would silently become SHARED,
     ! which is how the Wfull/Wblk_chk race reached production earlier this session. See HANDOFF 8.35.
     !$omp parallel default(none) &
-    !$omp   private(ibz, ic, iv, vme_ex_t, xme_ex_t, vme_ex_k_t, &
-    !$omp           xme_ex_inter_t, vme_ex_inter_t, &
-    !$omp           i_ex_table, F_cv, FcvH, D_c, A_c, &
-    !$omp           B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv, &
-    !$omp           out_v, out_y, out_q)&
+    !$omp   private(ibz, ic, iv, vme_ex_t, xme_ex_t, vme_ex_k_t, i_ex_table)&
     ! read-only inputs:
     !$omp   shared(npointstotal, nbasis, norb_ex_cut, nv_ex, nc_ex, nband_ex, nf, iflag_norder) &
     !$omp   shared(rkxvector, rkyvector, rkzvector) &
     !$omp   shared(ek, vme_ex_band, xme_ex_band, berry_eigen_ex_band) &
     ! accumulators: every update below is inside the !$omp critical section:
-    !$omp   shared(vme_ex, xme_ex, xme_ex_inter, vme_ex_inter) &
+    !$omp   shared(vme_ex, xme_ex) &
     ! k-resolved output, written only at this thread's own ibz:
     !$omp   shared(u_exk, do_write_exk)&
     !$omp   shared(kmoment)
@@ -220,32 +249,21 @@ contains
     ! review #8, 2026-09-23).
     allocate(i_ex_table(nc_ex, nv_ex))
 
-    if (iflag_norder == 2) then
-      allocate(xme_ex_inter_t(3, norb_ex_cut, norb_ex_cut)); xme_ex_inter_t = (0.0d0,0.0d0)
-      allocate(vme_ex_inter_t(3, norb_ex_cut, norb_ex_cut)); vme_ex_inter_t = (0.0d0,0.0d0)
-
-      allocate(F_cv (norb_ex_cut, nbasis))
-      allocate(FcvH (nbasis,      norb_ex_cut))
-      allocate(D_c  (nbasis,      norb_ex_cut))
-      allocate(A_c  (nbasis,      norb_ex_cut))
-      allocate(B_cc (nc_ex,       nc_ex))
-      allocate(Y_cc (nc_ex,       nc_ex))
-      allocate(B_vv (nv_ex,       nv_ex))
-      allocate(Y_vv (nv_ex,       nv_ex))
-      allocate(Uc   (nc_ex,       norb_ex_cut))
-      allocate(Wv   (nv_ex,       norb_ex_cut))
-      allocate(mid_cc(nc_ex,      norb_ex_cut))
-      allocate(mid_vv(nv_ex,      norb_ex_cut))
-      allocate(out_v(norb_ex_cut, norb_ex_cut))
-      allocate(out_y(norb_ex_cut, norb_ex_cut))
-      allocate(out_q(norb_ex_cut, norb_ex_cut))
-    end if
+    ! No per-thread inter-exciton arrays any more: get_ome_inter_ex_batched does that work after the
+    ! loop, with one shared workspace. This is the allocation that used to set the memory ceiling --
+    ! 144*nthreads*N^2 bytes, 31 GB of the 38.8 GB peak of a ReS2/2700 run (HANDOFF 8.51/8.52).
     
     
     !$omp do schedule(dynamic) ordered
     do ibz = 1, npointstotal
-      write(*,*) '   OME (ex): k-point', ibz, '/', npointstotal
-!       call percentage_index(ibz, npointstotal, kmoment)   ! REPLACES the per-ibz write(*,*)
+      ! Progress, not a transcript. This used to print once per k-point: on a 3600-point ReS2 run that
+      ! was 7200 of 7242 log lines (99%), which is how the OME_sp = none basis WARNING of 8.46 came to
+      ! be walked past in this project's own logs. It costs nothing in time either way (measured
+      ! 58.30 s vs 58.32 s with the line removed entirely), so the only thing at stake is whether a
+      ! real message can be seen. Every thread may print; the order is not guaranteed and does not
+      ! matter for a progress indicator.
+      if (mod(ibz, max(1, npointstotal/10)) == 0) &
+        write(*,*) '   OME (ex): k-point', ibz, '/', npointstotal
 
       ! Built ONCE per k-point (fix, code review #8): get_ome_gs_ex_sum_k, get_ome_gs_ex_kresolved
       ! and get_ome_inter_ex_sum_k each used to rebuild this independently via get_ex_index_first for
@@ -268,34 +286,21 @@ contains
         !$omp end ordered
       end if
 
-      if (iflag_norder == 2) &
-        call get_ome_inter_ex_sum_k(                                        &
-               ibz, xme_ex_band, vme_ex_band, berry_eigen_ex_band,         &
-               nbasis, i_ex_table, F_cv, FcvH, D_c, A_c,                   &
-               B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv,             &
-               out_v, out_y, out_q,                                        &
-               xme_ex_inter_t, vme_ex_inter_t)
+      ! The inter-exciton terms used to be accumulated here, once per k-point, into thread-private
+      ! (3,N,N) and (N,N) arrays. That is where this loop's memory went and why it stopped scaling
+      ! (HANDOFF 8.51). They are now done for all k at once by get_ome_inter_ex_batched, after the
+      ! loop; only the cheap ground-state terms above remain per-k.
     end do
     !$omp end do
 
     !$omp critical
       vme_ex = vme_ex + vme_ex_t
       xme_ex = xme_ex + xme_ex_t
-      if (iflag_norder == 2) then
-        xme_ex_inter = xme_ex_inter + xme_ex_inter_t
-        vme_ex_inter = vme_ex_inter + vme_ex_inter_t
-      end if
     !$omp end critical
 
     deallocate(vme_ex_t, xme_ex_t)
     if (do_write_exk) deallocate(vme_ex_k_t)
     deallocate(i_ex_table)
-    if (iflag_norder == 2) then
-      deallocate(xme_ex_inter_t, vme_ex_inter_t)
-      deallocate(F_cv, FcvH, D_c, A_c)
-      deallocate(B_cc, Y_cc, B_vv, Y_vv, Uc, Wv, mid_cc, mid_vv)
-      deallocate(out_v, out_y, out_q)
-    end if
 
     !$omp end parallel
 
@@ -306,8 +311,8 @@ contains
     end if
 
     if (iflag_norder == 2) then
-      ! xme_ex_inter and vme_ex_inter were accumulated directly in the k-loop (HANDOFF 8.45);
-      ! no recombination step is needed.
+      ! The whole k-sum for the inter-exciton terms, as one zgemm per term per direction.
+      call get_ome_inter_ex_batched(xme_ex_band, vme_ex_band, berry_eigen_ex_band, nbasis)
       deallocate(fk_ex_der)
       inter_terms_ready = .true.   ! ADD here
     end if
@@ -331,7 +336,7 @@ contains
   ! get_ome_gs_ex_sum_k). Guard FIXED 2026-09-23 (code review, get_ome_inter_ex_sum_k
   ! investigation): previously gated only by a magnitude clip on the RESULT (|x_nm| > 20), an
   ! undocumented, unphysical threshold of exactly the kind already proven wrong for
-  ! a magnitude clip on a derivative quantity (ome_sp.f90, code review finding #6) -- calibrated empirically
+  ! vme_der_pt's clip_threshold (ome_sp.f90, code review finding #6) -- calibrated empirically
   ! on MoSe2's real nv_ex=2 data (34-orbital window, 4900 k-points): 12.3% of ALL k-points had
   ! the v12-v13 pair (near-degenerate, median gap 43.7 meV, min 3.6e-8 eV) x_nm component
   ! either explode (up to 1.3e4) or get force-zeroed by the magnitude clip, an unprincipled mix
@@ -344,7 +349,7 @@ contains
   ! (non-degenerate) gap, however small, and only genuinely unreliable when the two
   ! single-particle bands are degenerate to within eps_deg, where p_nm itself becomes
   ! gauge-dependent within the degenerate subspace (same root cause class as ome_sp.f90's
-  ! near-degeneracy issues elsewhere). No magnitude clip is applied to the result.
+  ! vme_der_pt near-degeneracy issue). No magnitude clip is applied to the result.
   subroutine get_ome_sp_xme_ex_band(ek, vme_ex_band, xme_ex_band)
     implicit none
     real(8),    intent(in)  :: ek(npointstotal, nband_ex)
@@ -385,7 +390,6 @@ contains
   !     Now built ONCE per ibz by the caller (get_ome_ex) and passed in as
   !     an intent(in) argument, shared by all three.
   !  2. The internal !$omp parallel do is REMOVED: this subroutine is now
-  !     called from inside the single parallel region opened in
   !     get_ome_ex, once per ibz, by whichever thread owns that ibz -- an
   !     inner parallel region here would either be ignored (nesting
   !     disabled, the common default) or spawn a costly nested team.
@@ -691,6 +695,173 @@ contains
 
   end subroutine get_ome_inter_ex_sum_k
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!> Batched form of get_ome_inter_ex_sum_k: the SAME sums, done over every k-point at once.
+!!
+!! Why. Each of the six terms above is, per k-point, an (N x N) accumulation whose inner dimension is
+!! only nc_ex, nv_ex or nbasis -- a rank-deficient zgemm, which runs at level-2 speed (arithmetic
+!! intensity ~2) and is therefore bound by memory traffic, not arithmetic. Worse, the scratch arrays it
+!! needs are (N,N) PER THREAD, so the aggregate working set grows as 48*nthreads*N^2 bytes and leaves
+!! cache as soon as N or the thread count grows: measured on hBN_N60, the loop scaled x3.3 at N = 100,
+!! ran 2.6x SLOWER than serial at N = 400, and gained nothing at all at N = 800 (HANDOFF 8.51).
+!!
+!! The fix is to fold the k index into the zgemm's inner dimension. The key identity is that the
+!! per-k blocks are contiguous slices of fk_ex: get_ex_index_first gives
+!! i_ex = nbasis*(ibz-1) + (ic-1)*nv_ex + iv, so fk_ex's rows are ALREADY ordered (k, ic, iv) and no
+!! permutation is needed. Every term then has the form
+!!
+!!     sum_k (block_k)^H (M_k block_k)  =  fk_ex^H G ,   G(i_ex,:) = (M_k fk_ex)(i_ex,:)
+!!
+!! i.e. one (N x norb_ex) x (norb_ex x N) zgemm per term per Cartesian direction, with inner dimension
+!! norb_ex = nbasis*npointstotal instead of nbasis. Arithmetic intensity rises from ~2 to ~norb_ex, the
+!! operation becomes compute bound, and OpenBLAS threads it internally from serial code.
+!!
+!! Memory: one shared workspace G (norb_ex x N) and two shared accumulators (N x N), replacing the
+!! per-thread (3,N,N) accumulators and (N,N) scratch arrays entirely -- so the peak stops scaling with
+!! the thread count.
+!!
+!! @param[in] xme_ex_band        position matrix elements in the band basis
+!! @param[in] vme_ex_band        velocity matrix elements in the band basis
+!! @param[in] berry_eigen_ex_band  Berry connections, for the intraband shift of the Q term
+!! @param[in] nbasis             nc_ex*nv_ex, the per-k exciton basis size
+!! @return void (fills the module arrays xme_ex_inter and vme_ex_inter)
+  subroutine get_ome_inter_ex_batched(xme_ex_band, vme_ex_band, berry_eigen_ex_band, nbasis)
+    implicit none
+    integer,    intent(in) :: nbasis
+    complex(8), intent(in) :: xme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(in) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
+    complex(8), intent(in) :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
+
+    complex(8), allocatable :: G(:,:), accX(:,:), accV(:,:)
+    integer    :: nj, ibz, ic, icp, iv, ivp, base, irow, icol
+    real(8)    :: berry_shift
+    complex(8), parameter :: ci    = (0.0d0, 1.0d0)
+    complex(8), parameter :: cone  = (1.0d0, 0.0d0)
+    complex(8), parameter :: czero = (0.0d0, 0.0d0)
+    complex(8), parameter :: cmone = (-1.0d0, 0.0d0)
+
+    allocate(G(norb_ex, norb_ex_cut))
+    allocate(accX(norb_ex_cut, norb_ex_cut), accV(norb_ex_cut, norb_ex_cut))
+
+    do nj = 1, 3
+      accX = czero
+      accV = czero
+
+      ! ---- conduction block: sum_k sum_iv Uc^H (B_cc Uc), Uc(ic,:) = fk_ex(idx(k,ic,iv),:) ---------
+      ! velocity -> vme_ex_inter (+), position -> xme_ex_inter (+, diagonal of Y_cc removed)
+      call build_cond(vme_ex_band, .false.)
+      call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cone, fk_ex, norb_ex, &
+                 G, norb_ex, cone, accV, norb_ex_cut)
+      call build_cond(xme_ex_band, .true.)
+      call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cone, fk_ex, norb_ex, &
+                 G, norb_ex, cone, accX, norb_ex_cut)
+
+      ! ---- valence block: -sum_k sum_ic Wv^H (B_vv Wv), Wv(iv,:) = fk_ex(idx(k,ic,iv),:) -----------
+      ! NOTE the band-index order B_vv(iv,ivp) = vme(...,ivp,iv) is TRANSPOSED on purpose; see the
+      ! note in get_ome_inter_ex_sum_k (Taghizadeh & Pedersen Eq. B3a, the electron/hole asymmetry).
+      call build_val(vme_ex_band, .false.)
+      call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cmone, fk_ex, norb_ex, &
+                 G, norb_ex, cone, accV, norb_ex_cut)
+      call build_val(xme_ex_band, .true.)
+      call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cmone, fk_ex, norb_ex, &
+                 G, norb_ex, cone, accX, norb_ex_cut)
+
+      ! ---- Q term 1: i * fk_ex^H (d fk_ex / dk) ---------------------------------------------------
+      !$omp parallel do default(none) private(irow, icol) shared(G, fk_ex_der, nj, norb_ex, norb_ex_cut)
+      do icol = 1, norb_ex_cut
+        do irow = 1, norb_ex
+          G(irow, icol) = fk_ex_der(nj, irow, icol)
+        end do
+      end do
+      !$omp end parallel do
+      call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, ci, fk_ex, norb_ex, &
+                 G, norb_ex, cone, accX, norb_ex_cut)
+
+      ! ---- Q term 2: i * fk_ex^H (-i * berry_shift * fk_ex) ---------------------------------------
+      !$omp parallel do default(none) private(ibz, ic, iv, base, irow, berry_shift) &
+      !$omp   shared(G, fk_ex, berry_eigen_ex_band, nj, nbasis, npointstotal, nc_ex, nv_ex, norb_ex_cut)
+      do ibz = 1, npointstotal
+        base = nbasis*(ibz-1)
+        do ic = 1, nc_ex
+          do iv = 1, nv_ex
+            berry_shift = dble(berry_eigen_ex_band(ibz,nj,nv_ex+ic,nv_ex+ic)) &
+                        - dble(berry_eigen_ex_band(ibz,nj,iv,iv))
+            irow = base + (ic-1)*nv_ex + iv
+            G(irow, :) = -ci * fk_ex(irow, :) * berry_shift
+          end do
+        end do
+      end do
+      !$omp end parallel do
+      call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, ci, fk_ex, norb_ex, &
+                 G, norb_ex, cone, accX, norb_ex_cut)
+
+      xme_ex_inter(nj,:,:) = accX
+      vme_ex_inter(nj,:,:) = accV
+    end do
+
+    deallocate(G, accX, accV)
+
+  contains
+
+    !> G(idx(k,ic,iv),:) = sum_icp M(k,nj,nv+ic,nv+icp) * fk_ex(idx(k,icp,iv),:)
+    !! zero_diag removes the ic == icp term, which is how Y_cc is built from xme_ex_band.
+    subroutine build_cond(M, zero_diag)
+      complex(8), intent(in) :: M(npointstotal, 3, nband_ex, nband_ex)
+      logical,    intent(in) :: zero_diag
+      integer    :: kk, jc, jcp, jv, b, r, rp, n
+      complex(8) :: acc
+      !$omp parallel do default(none) private(kk, jc, jcp, jv, b, r, rp, n, acc) &
+      !$omp   shared(G, fk_ex, M, nj, nbasis, npointstotal, nc_ex, nv_ex, norb_ex_cut, zero_diag)
+      do kk = 1, npointstotal
+        b = nbasis*(kk-1)
+        do jc = 1, nc_ex
+          do jv = 1, nv_ex
+            r = b + (jc-1)*nv_ex + jv
+            do n = 1, norb_ex_cut
+              acc = czero
+              do jcp = 1, nc_ex
+                if (zero_diag .and. jcp == jc) cycle
+                rp = b + (jcp-1)*nv_ex + jv
+                acc = acc + M(kk, nj, nv_ex+jc, nv_ex+jcp) * fk_ex(rp, n)
+              end do
+              G(r, n) = acc
+            end do
+          end do
+        end do
+      end do
+      !$omp end parallel do
+    end subroutine build_cond
+
+    !> G(idx(k,ic,iv),:) = sum_ivp M(k,nj,ivp,iv) * fk_ex(idx(k,ic,ivp),:)   [note the transpose]
+    subroutine build_val(M, zero_diag)
+      complex(8), intent(in) :: M(npointstotal, 3, nband_ex, nband_ex)
+      logical,    intent(in) :: zero_diag
+      integer    :: kk, jc, jv, jvp, b, r, rp, n
+      complex(8) :: acc
+      !$omp parallel do default(none) private(kk, jc, jv, jvp, b, r, rp, n, acc) &
+      !$omp   shared(G, fk_ex, M, nj, nbasis, npointstotal, nc_ex, nv_ex, norb_ex_cut, zero_diag)
+      do kk = 1, npointstotal
+        b = nbasis*(kk-1)
+        do jc = 1, nc_ex
+          do jv = 1, nv_ex
+            r = b + (jc-1)*nv_ex + jv
+            do n = 1, norb_ex_cut
+              acc = czero
+              do jvp = 1, nv_ex
+                if (zero_diag .and. jvp == jv) cycle
+                rp = b + (jc-1)*nv_ex + jvp
+                acc = acc + M(kk, nj, jvp, jv) * fk_ex(rp, n)
+              end do
+              G(r, n) = acc
+            end do
+          end do
+        end do
+      end do
+      !$omp end parallel do
+    end subroutine build_val
+
+  end subroutine get_ome_inter_ex_batched
+
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! SECOND-ORDER EXCITONIC OME CACHE  (draft -- to be pasted into module ome_ex)
@@ -711,10 +882,19 @@ contains
 ! Format: unformatted stream. Text would be ~5x larger and slow to parse. Total payload is
 ! 2*3*N^2 + 2*3*N complex(8): 338 MB at N = 1875, 1.24 GB at N = 3600, 3.0 GB at N = 5625.
 !
-! Staleness: the header carries the identifying parameters AND the full exciton energy list, which is a
-! strong fingerprint of the Xatu solution. It does NOT fingerprint the Wannier90 file, so a changed
-! tight-binding model with an unchanged exciton spectrum would go undetected. The cache is therefore
-! OPT-IN (see the call-site patch below) rather than automatic.
+! Staleness: the header carries the identifying parameters, the BAND LIST nband_index, AND the full
+! exciton energy list, which together are a strong fingerprint of the Xatu solution. It does NOT
+! fingerprint the Wannier90 file, so a changed tight-binding model with an unchanged exciton spectrum
+! would go undetected. The cache is therefore OPT-IN (see the call-site patch below) rather than
+! automatic.
+!
+! VERSION 2 (2026-09-30) added nband_index to the header. Version 1 recorded only the COUNTS nv_ex and
+! nc_ex, so it could not tell [60,61] from [61,60] -- exactly the band-order defect of HANDOFF 8.53,
+! which silently invalidated a whole ReS2 artifact set and was found only by comparing physical results.
+! A v1 file is now rejected as a clean miss (it cannot be upgraded: the order it was written with is
+! unknowable), and a v2 file whose band list differs from the current one STOPS the run, like the
+! dimension and energy mismatches, because reusing elements built on a different band set is a wrong
+! answer rather than a slow one.
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
   subroutine ome_ex_cache_name(fname)
@@ -728,7 +908,7 @@ contains
   subroutine write_ome_ex_second()
     implicit none
     character(len=14), parameter :: MAGIC = 'OPTICX-OMEEX2 '
-    integer,           parameter :: VERSION = 1
+    integer,           parameter :: VERSION = 2
     character(len=256) :: fname
     integer :: u, ios, m
 
@@ -750,6 +930,8 @@ contains
     write(u) len_trim(material_name)
     write(u) trim(material_name)
     write(u) npointstotal, nv_ex, nc_ex, norb_ex_cut
+    write(u) nband_ex                                 ! v2: the band LIST, not just the counts --
+    write(u) nband_index(1:nband_ex)                  ! nv/nc alone cannot tell [60,61] from [61,60]
     write(u) e_ex(1:norb_ex_cut)                      ! fingerprint of the Xatu solution
     write(u) xme_ex(1:3, 1:norb_ex_cut)
     write(u) vme_ex(1:3, 1:norb_ex_cut)
@@ -773,12 +955,14 @@ contains
     implicit none
     logical, intent(out) :: ok
     character(len=14), parameter :: MAGIC = 'OPTICX-OMEEX2 '
-    integer,           parameter :: VERSION = 1
+    integer,           parameter :: VERSION = 2
     real(8),           parameter :: ETOL = 1.0d-10
     character(len=256) :: fname
     character(len=14)  :: magic_in
     character(len=256) :: mat_in
     integer :: u, ios, ver, nlen, np_in, nv_in, nc_in, nex_in, m
+    integer :: nband_in
+    integer,    allocatable :: nbidx_in(:)
     real(8),    allocatable :: e_in(:)
     complex(8), allocatable :: buf(:,:)
     logical :: there
@@ -794,7 +978,13 @@ contains
 
     read(u, iostat=ios) magic_in, ver
     if (ios /= 0 .or. magic_in /= MAGIC .or. ver /= VERSION) then
-      write(*,*) '   Cache '//trim(fname)//' has a different format, ignoring it.'
+      if (ios == 0 .and. magic_in == MAGIC .and. ver == 1) then
+        write(*,*) '   Cache '//trim(fname)//' is format version 1, which does NOT record the band'
+        write(*,*) '        list and therefore cannot be checked for the band-order defect of'
+        write(*,*) '        HANDOFF 8.53. Ignoring it and recomputing; delete the file.'
+      else
+        write(*,*) '   Cache '//trim(fname)//' has a different format, ignoring it.'
+      end if
       close(u); return
     end if
     read(u, iostat=ios) nlen
@@ -814,6 +1004,30 @@ contains
       write(*,*) '          Delete it or move it aside; refusing to mix exciton sets.'
       close(u); stop 1
     end if
+    ! v2: the BAND LIST. nv_ex/nc_ex above are only counts, and both [60,61] and [61,60] give
+    ! nv = 4, nc = 2 -- which is precisely why the HANDOFF 8.53 defect survived a count-based check.
+    read(u, iostat=ios) nband_in
+    if (ios /= 0) then; close(u); return; end if
+    if (nband_in /= nband_ex) then
+      write(*,*) '   ERROR (read_ome_ex_second): '//trim(fname)//' has a DIFFERENT number of bands.'
+      write(*,'(A,I0,A,I0)') '          cached: ', nband_in, '   wanted: ', nband_ex
+      write(*,*) '          Delete it or move it aside; refusing to mix band sets.'
+      close(u); stop 1
+    end if
+    allocate(nbidx_in(nband_in))
+    read(u, iostat=ios) nbidx_in
+    if (ios /= 0) then; deallocate(nbidx_in); close(u); return; end if
+    if (any(nbidx_in /= nband_index(1:nband_ex))) then
+      write(*,*) '   ERROR (read_ome_ex_second): '//trim(fname)//' was written for a DIFFERENT band set'
+      write(*,*) '          (or the same bands in a different ORDER, which is just as wrong).'
+      write(*,'(A,20I5)') '          cached band list: ', nbidx_in
+      write(*,'(A,20I5)') '          current band list: ', nband_index(1:nband_ex)
+      write(*,*) '          The exciton envelopes would be paired with the wrong bands -- see'
+      write(*,*) '          HANDOFF 8.53. Delete it or move it aside.'
+      deallocate(nbidx_in); close(u); stop 1
+    end if
+    deallocate(nbidx_in)
+
     if (nex_in < norb_ex_cut) then
       write(*,'(A,I0,A,I0,A)') '   Cache holds only ', nex_in, ' excitons but ', norb_ex_cut, &
            ' are requested; recomputing.'
@@ -884,14 +1098,15 @@ contains
 
   subroutine write_ome_ex_linear(vme_ex)
     implicit none
+    integer :: iounit10
     complex(8), intent(in) :: vme_ex(3, norb_ex_cut)
     integer :: nn, nj
-    open(10, file='ome_linear_ex_'//trim(material_name)//'.omeex')
-    write(10,*) 1
+    open(newunit=iounit10, file='ome_linear_ex_'//trim(material_name)//'.omeex')
+    write(iounit10,*) 1
     do nn = 1, norb_ex_cut
-      write(10,*) nn, (dble(vme_ex(nj,nn)), dimag(vme_ex(nj,nn)), nj=1,3)
+      write(iounit10,*) nn, (dble(vme_ex(nj,nn)), dimag(vme_ex(nj,nn)), nj=1,3)
     end do
-    close(10)
+    close(iounit10)
   end subroutine write_ome_ex_linear
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -927,38 +1142,46 @@ contains
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine read_ome_sp_linear(iflag_norder, npointstotal, nband_ex, vme_ex_band, ek)
     implicit none
+    integer :: iounit10
     integer,    intent(in)  :: iflag_norder, npointstotal, nband_ex
     real(8),    intent(out) :: ek(npointstotal, nband_ex)
     complex(8), intent(out) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
     integer :: ibz, i, j, iflag_r
     real(8) :: a1, a2, a3, b1, b2, b3, b4, b5, b6
-    open(10, file='ome_linear_sp_'//trim(material_name)//'.omesp')
-    read(10,*) iflag_r
+    open(newunit=iounit10, file='ome_linear_sp_'//trim(material_name)//'.omesp')
+    read(iounit10,*) iflag_r
     do ibz = 1, npointstotal
-      read(10,*) a1, a2, a3, (ek(ibz,j), j=1,nband_ex)
+      read(iounit10,*) a1, a2, a3, (ek(ibz,j), j=1,nband_ex)
       do i = 1, nband_ex
         do j = 1, nband_ex
-          read(10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
+          read(iounit10,*) a1, a2, a3, b1, b2, b3, b4, b5, b6
           vme_ex_band(ibz,1,i,j) = cmplx(b1,b2,8)
           vme_ex_band(ibz,2,i,j) = cmplx(b3,b4,8)
           vme_ex_band(ibz,3,i,j) = cmplx(b5,b6,8)
         end do
       end do
     end do
-    close(10)
+    close(iounit10)
   end subroutine read_ome_sp_linear
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, &
                                     berry_eigen_ex_band, gen_der_ex_band, &
                                     shift_vector_ex_band, vme_ex_band, ek, &
-                                    vme_abs_der_ex_band, vme_abs_der_found)
+                                    vme_abs_der_ex_band, vme_abs_der_found, &
+                                    vme_der_pt_ex_band, vme_der_pt_found)
    implicit none
+   integer :: iounit10
    integer, intent(in)  :: iflag_norder, npointstotal, nband_ex
    ! optional: derivative of |v|, appended after the per-k records; absent in older files
    real(8),    intent(out), optional :: vme_abs_der_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
    logical,    intent(out), optional :: vme_abs_der_found
-   integer :: ios_vd
+   ! optional: gauge-fixed (parallel-transported) complex generalized derivative of v, appended after
+   ! vme_abs_der_ex_band; absent in older files. Must be requested together with vme_abs_der_ex_band
+   ! (see the read below) since both are read sequentially from an unformatted stream.
+   complex(8), intent(out), optional :: vme_der_pt_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+   logical,    intent(out), optional :: vme_der_pt_found
+   integer :: ios_vd, ios_vdpt
    real(8), intent(out) :: ek(npointstotal, nband_ex)
    complex(8), intent(out) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
    complex(8), intent(out) :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
@@ -975,12 +1198,12 @@ contains
    integer :: ibz, iflag_r, npts_r, nband_r
    real(8), allocatable :: rkx_r(:), rky_r(:), rkz_r(:)
 
-   ios_vd = -1
-   open(10, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp', &
+   ios_vd = -1   ! set even if vme_abs_der_ex_band is not requested, so the vme_der_pt check below is well defined
+   open(newunit=iounit10, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp', &
         form='unformatted', access='stream', status='old')
 
-   read(10) iflag_r
-   read(10) npts_r, nband_r
+   read(iounit10) iflag_r
+   read(iounit10) npts_r, nband_r
    ! The .omesp file is unformatted stream I/O with no self-describing record boundaries: if it
    ! was generated for a different Bandlist or k-grid than the one now being requested (e.g. a
    ! stale file reused with OME_sp = none after changing the input), the per-k reads below would
@@ -993,32 +1216,41 @@ contains
       stop 1
    end if
    allocate(rkx_r(npts_r), rky_r(npts_r), rkz_r(npts_r))
-   read(10) rkx_r, rky_r, rkz_r
+   read(iounit10) rkx_r, rky_r, rkz_r
 
    do ibz = 1, npointstotal
-      read(10) ek(ibz,:)
-      read(10) vme_ex_band(ibz,:,:,:)
-      read(10) berry_eigen_ex_band(ibz,:,:,:)
+      read(iounit10) ek(ibz,:)
+      read(iounit10) vme_ex_band(ibz,:,:,:)
+      read(iounit10) berry_eigen_ex_band(ibz,:,:,:)
       if (present(shift_vector_ex_band)) then
-         read(10) shift_vector_ex_band(ibz,:,:,:,:)
+         read(iounit10) shift_vector_ex_band(ibz,:,:,:,:)
       else
-         read(10) sv_skip
+         read(iounit10) sv_skip
       end if
       if (present(gen_der_ex_band)) then
-         read(10) gen_der_ex_band(ibz,:,:,:,:)
+         read(iounit10) gen_der_ex_band(ibz,:,:,:,:)
       else
-         read(10) gd_skip
+         read(iounit10) gd_skip
       end if
    end do
 
    if (present(vme_abs_der_ex_band)) then
-      read(10, iostat=ios_vd) vme_abs_der_ex_band
+      read(iounit10, iostat=ios_vd) vme_abs_der_ex_band
       if (ios_vd /= 0) vme_abs_der_ex_band = 0.0d0
       if (present(vme_abs_der_found)) vme_abs_der_found = (ios_vd == 0)
    end if
 
+   if (present(vme_der_pt_ex_band)) then
+      if (ios_vd == 0) then
+         read(iounit10, iostat=ios_vdpt) vme_der_pt_ex_band
+      else
+         ios_vdpt = ios_vd   ! stream already off-position (older file): can't read this block either
+      end if
+      if (ios_vdpt /= 0) vme_der_pt_ex_band = (0.0d0, 0.0d0)
+      if (present(vme_der_pt_found)) vme_der_pt_found = (ios_vdpt == 0)
+   end if
 
-   close(10)
+   close(iounit10)
   end subroutine read_ome_sp_nonlinear
   
   !!!!!

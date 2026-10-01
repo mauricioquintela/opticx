@@ -6,6 +6,7 @@ module parser_optics_xatu_dim
     only:xatu_eigval_filepath_in,xatu_states_filepath_in, & !filepaths
       ndim,npointstotal_sq, & !variables
       iflag_xatu,nf,nband_index,norb_ex_cut, & 
+      cache_ome_read,iflag_ome_ex_text,iflag_write_exk, & !for the fk_ex deferral, below
       read_line_numbers_int !subroutine
   implicit none
 
@@ -22,7 +23,23 @@ module parser_optics_xatu_dim
   real(8) auxr1
   real(8) e_ex
   complex*16 fk_ex
-  
+
+  ! .true. once fk_ex is known to sit in the SAME single-particle basis the response routines use:
+  ! either ome_sp carried it into the Eq. (A4) rotated basis (rotate_fk_ex_to_a4_basis), or that
+  ! rotation is switched off and there is nothing to carry. Anything that consumes fk_ex must refuse
+  ! to run while this is .false., because the answer is then wrong by O(1) and not by a little
+  ! (HANDOFF 8.46). It lives here, next to fk_ex, so that ome_sp (which sets it) and ome_ex (which
+  ! checks it) share it without either module having to use the other.
+  logical :: fk_ex_basis_ok = .false.
+
+  ! .true. once the exciton envelopes have actually been read from the .states file. Reading them is
+  ! the second most expensive part of start-up (measured 16.8 s of a 22 s fixed cost on ReS2 with 2700
+  ! excitons: 1.9 GB of ASCII), and a second-order OME cache HIT never touches them -- the cached
+  ! matrix elements are what the k-loop would have produced from fk_ex. So the read is DEFERRED when a
+  ! hit is possible and done lazily by load_fk_ex() if the cache turns out to miss, which costs exactly
+  ! what it costs today. Anything that consumes fk_ex must check this first.
+  logical :: fk_ex_loaded = .false.
+
   dimension G(3,3)
 
   allocatable rkxvector(:)
@@ -104,12 +121,6 @@ subroutine get_optics_xatu_dim()
   end if
   write(*,*) "   Grid and band parameters have been set"
   
-!   write(*,*) rkxvector(1),rkyvector(1),rkzvector(1)
-!   write(*,*) rkxvector(2),rkyvector(2),rkzvector(2)
-!   write(*,*) rkxvector(3),rkyvector(3),rkzvector(3)
-!   write(*,*) G(1,1),G(1,2),G(1,3)
-!   write(*,*) G(2,1),G(2,2),G(2,3)
-!   write(*,*) G(3,1),G(3,2),G(3,3)
 end subroutine get_optics_xatu_dim   
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!    
@@ -117,6 +128,7 @@ end subroutine get_optics_xatu_dim
 ! the total exciton probability density
 subroutine print_exciton_wf(isum,iv,ic,nn)
   implicit none
+  integer :: iounit10
   integer isum,iv,ic,nn
   integer iv_s,ic_s
   integer iright,i_ex_nn
@@ -124,7 +136,7 @@ subroutine print_exciton_wf(isum,iv,ic,nn)
   real*8 prob_k
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   iright=0
-  open(10,file='exciton_wf.dat')
+  open(newunit=iounit10,file='exciton_wf.dat')
   do ibz=1,npointstotal     
     if (isum.eq.1) then
       prob_k=0.0d0
@@ -134,13 +146,13 @@ subroutine print_exciton_wf(isum,iv,ic,nn)
           prob_k=prob_k+abs(fk_ex(i_ex_nn,nn))**2
         end do
       end do
-      write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),prob_k
+      write(iounit10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),prob_k
     else
       call get_ex_index_first(nf,nv_ex,nc_ex,iright,ibz,i_ex_nn,ic,iv)
-      write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),abs(fk_ex(i_ex_nn,nn))
+      write(iounit10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),abs(fk_ex(i_ex_nn,nn))
     end if
   end do
-  close(10)
+  close(iounit10)
 end subroutine print_exciton_wf
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	
 
@@ -175,6 +187,7 @@ subroutine get_exciton_dim()
   integer :: iexit
   integer :: i,j,naux,npointstotal_sq
   integer :: hdr1, hdr2, ios
+  integer :: iounit_bands, iounit_nk
   integer :: nv_ex_local, nc_ex_local, norb_ex_band_local
 
   real(8) aux1
@@ -186,10 +199,10 @@ subroutine get_exciton_dim()
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   !save number of valence bands
   file2open=trim(xatu_states_filepath_in)
-  open(10,file=file2open)
-  read(10,*) 
+  open(newunit=iounit_bands,file=file2open)
+  read(iounit_bands,*) 
   do i=1,max_scan/2
-    read(10,*) aux1,aux1,aux1,nband_index_aux1(i)
+    read(iounit_bands,*) aux1,aux1,aux1,nband_index_aux1(i)
     if (i.gt.1) then
       do j=1,i-1
         if (nband_index_aux1(i).eq.nband_index_aux1(j)) then
@@ -205,13 +218,18 @@ subroutine get_exciton_dim()
   128   continue
 
   !save number of conduction bands
-  open(10,file=file2open)
-  read(10,*) 
-  do i=1,500
-    read(10,*) aux1,aux1,aux1,naux,nband_index_aux2(i) 
+  ! rewind, NOT a second open: re-opening a unit already connected to the SAME file leaves the file
+  ! POSITION untouched (F2008 9.5.6.1, and gfortran behaves that way -- verified), so the open that
+  ! used to sit here never did the rewind it looks like it does. The scan below happened to survive
+  ! that because the basis list is periodic, so a stride-nv scan finds the same repeat from any
+  ! offset -- checked against all four .states files. Relying on that is not worth a saved line.
+  rewind(iounit_bands)
+  read(iounit_bands,*) 
+  do i=1,max_scan/2
+    read(iounit_bands,*) aux1,aux1,aux1,naux,nband_index_aux2(i) 
     if (nband_ex_aux1.gt.1) then
       do j=1,nband_ex_aux1-1
-        read(10,*)
+        read(iounit_bands,*)
       end do
     end if
     
@@ -228,7 +246,7 @@ subroutine get_exciton_dim()
             max_scan/2, ' lines.'
   stop 1
   129   continue
-  close(10)	 
+  close(iounit_bands)	 
 
   nband_ex_aux=nband_ex_aux1+nband_ex_aux2
   allocate(nband_index(nband_ex_aux))
@@ -249,10 +267,10 @@ subroutine get_exciton_dim()
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   !get nk
   file2open=trim(xatu_eigval_filepath_in)
-  open(10,file=file2open)
-  read(10,*,iostat=ios) hdr1
+  open(newunit=iounit_nk,file=file2open)
+  read(iounit_nk,*,iostat=ios) hdr1
   if (ios == 0) then
-    read(10,*,iostat=ios) hdr2
+    read(iounit_nk,*,iostat=ios) hdr2
     if (ios == 0) then
       npointstotal_sq = hdr1
       naux = hdr2
@@ -274,11 +292,11 @@ subroutine get_exciton_dim()
       end if
     end if
   else
-    rewind(10)
-    read(10,*) npointstotal_sq
-    read(10,*) naux
+    rewind(iounit_nk)
+    read(iounit_nk,*) npointstotal_sq
+    read(iounit_nk,*) naux
   end if
-  close(10)
+  close(iounit_nk)
 
   !get N_BSE=nv_ex*nc_ex*nk variables
   if (npointstotal == 0) then
@@ -325,9 +343,7 @@ subroutine get_reciprocal_vectors()
   
   ! 2D
   elseif ( ndim == 2 ) then
-      !write(*,*) "2D, got here"
     if (active_y .and. active_z) then
-      !write(*,*) "2D, x zero"
       G(2,2)=2.0d0*pi*(-R(2,3)*R(3,2)+R(2,2)*R(3,3))**(-1.0d0) &
           *(R(3,3))
       G(2,3)=2.0d0*pi*(-R(2,2)*R(3,3)+R(2,3)*R(3,2))**(-1.0d0) &
@@ -339,7 +355,6 @@ subroutine get_reciprocal_vectors()
       call crossproduct(R(3,1),R(3,2),R(3,3),R(2,1),R(2,2),R(2,3),cx,cy,cz)
       
     elseif (active_x .and. active_z) then
-      !write(*,*) "2D, y zero"
       G(1,1)=2.0d0*pi*(-R(1,3)*R(3,1)+R(1,1)*R(3,3))**(-1.0d0) &
           *(R(3,3))
       G(1,3)=2.0d0*pi*(-R(1,1)*R(3,3)+R(1,3)*R(3,1))**(-1.0d0) &
@@ -351,7 +366,6 @@ subroutine get_reciprocal_vectors()
       call crossproduct(R(1,1),R(1,2),R(1,3),R(3,1),R(3,2),R(3,3),cx,cy,cz)
       
     else
-      !write(*,*) "2D, z zero"
       G(1,1)=2.0d0*pi*(-R(1,1)*R(2,2)+R(1,2)*R(2,1))**(-1.0d0) &
           *(-R(2,2))
       G(1,2)=2.0d0*pi*(-R(1,1)*R(2,2)+R(1,2)*R(2,1))**(-1.0d0) &
@@ -394,65 +408,62 @@ end subroutine get_reciprocal_vectors
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	
 subroutine get_exciton_data()
   implicit none
-  integer j,nkaka
+  integer j,nkaka,nread
   integer ib,ibz,ibz_sum,jind  
   real(8) auxr1
 
   dimension auxr1(2*norb_ex)
   character(len=:), allocatable :: file2open
   integer :: header1, ios
+  integer :: iounit_eex, iounit_kgrid
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!		  
   !get energies
   file2open=trim(xatu_eigval_filepath_in)
-  open(10,file=file2open) 
-  read(10,*,iostat=ios) header1
-  read(10,*,iostat=ios)
+  open(newunit=iounit_eex,file=file2open) 
+  read(iounit_eex,*,iostat=ios) header1
+  read(iounit_eex,*,iostat=ios)
   if (ios == 0) then
-    read(10,*,iostat=ios) nkaka
+    read(iounit_eex,*,iostat=ios) nkaka
     if (ios == 0) then
+      nread = 0
       do j=1,norb_ex_cut
-        read(10,*,iostat=ios) e_ex(j)
+        read(iounit_eex,*,iostat=ios) e_ex(j)
         if (ios /= 0) exit
+        nread = nread + 1
       end do
+      ! Asking for more excitons than Xatu wrote used to run off the end of the file and die inside
+      ! load_fk_ex with a bare "Fortran runtime error: End of file" and a backtrace, naming neither the
+      ! keyword nor the limit. The count is right here, so say so.
+      if (nread < norb_ex_cut) then
+        write(*,*) 'ERROR (get_exciton_data): Exciton_cutoff =', norb_ex_cut, 'but only', nread
+        write(*,*) '       exciton energies are present in ', trim(file2open)
+        write(*,*) '       Lower Exciton_cutoff to at most', nread, ', or rerun Xatu with a larger -n.'
+        stop 1
+      end if
     else
-      rewind(10)
-      read(10,*)
-      read(10,*) nkaka,(e_ex(j), j=1,norb_ex_cut)
+      rewind(iounit_eex)
+      read(iounit_eex,*)
+      read(iounit_eex,*) nkaka,(e_ex(j), j=1,norb_ex_cut)
     end if
   else
-    rewind(10)
-    read(10,*)
-    read(10,*) nkaka,(e_ex(j), j=1,norb_ex_cut)
+    rewind(iounit_eex)
+    read(iounit_eex,*)
+    read(iounit_eex,*) nkaka,(e_ex(j), j=1,norb_ex_cut)
   end if
-  close(10)
+  close(iounit_eex)
 
   file2open=trim(xatu_states_filepath_in)
-    open(10,file=file2open)	  	  
-    read(10,*) 
+    open(newunit=iounit_kgrid,file=file2open)	  	  
+    read(iounit_kgrid,*) 
 
     !reading k-mesh
     do ibz=1,npointstotal
-        read(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz)
+        read(iounit_kgrid,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz)
         do ib=1,norb_ex_band-1
-          read(10,*) 
+          read(iounit_kgrid,*) 
       end do
     end do
-  
-  !reading exciton-wf  
-  ibz_sum=0
-  write(*,*) '   Reading exciton wavefunctions...'
-  do ibz=1,norb_ex_cut
-    ibz_sum=ibz_sum+1
-    if (abs(dble(ibz)/dble(norb_ex_cut))*100.0d0-100.0d0 .lt. 5.0d0) then
-      call percentage_index(ibz_sum,norb_ex_cut,nkaka)
-    end if
-    read(10,*) (auxr1(j),j=1,2*norb_ex)
-    do j=1,norb_ex    
-      jind=2*j-1
-      fk_ex(j,ibz)=complex(auxr1(jind),auxr1(jind+1))
-    end do
-  end do
-  close(10)
+  close(iounit_kgrid)
 
   !Please I like to work in atomic units!  	
   e_ex=e_ex/27.211385d0
@@ -460,7 +471,66 @@ subroutine get_exciton_data()
   rkyvector=rkyvector*0.52917721067121d0 
   rkzvector=rkzvector*0.52917721067121d0 
 
+  ! The envelopes themselves are read here only if something is going to use them. A second-order OME
+  ! cache read may make them unnecessary; in that case load_fk_ex() is called later, by get_ome_ex, if
+  ! and only if the cache misses. The predicate is deliberately coarse -- it asks whether a hit is
+  ! POSSIBLE, not whether it will happen -- because a wrong guess costs only the same read, later.
+  if (.not. (cache_ome_read .and. iflag_ome_ex_text == 'nonlinear' .and. .not. iflag_write_exk)) then
+    call load_fk_ex()
+  else
+    write(*,*) '   Exciton envelopes not read yet: a second-order cache may make them unnecessary'
+  end if
+
 end subroutine get_exciton_data
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Read the exciton envelopes fk_ex from the .states file. Split out of get_exciton_data so that it can
+! be skipped when a second-order OME cache hit will supply the excitonic matrix elements directly, and
+! run on demand if that cache misses. Re-opens the file and skips the k-mesh block (norb_ex lines),
+! which is cheap next to the norb_ex_cut wavefunctions that follow.
+subroutine load_fk_ex()
+  implicit none
+  integer :: iounit10
+  integer j,ib,ibz,ibz_sum,jind,nkaka,ios
+  real(8) auxr1
+  dimension auxr1(2*norb_ex)
+  character(len=:), allocatable :: file2open
+
+  if (fk_ex_loaded) return
+  nkaka = 0
+
+  file2open=trim(xatu_states_filepath_in)
+  open(newunit=iounit10,file=file2open)
+  read(iounit10,*)
+  do ibz=1,npointstotal          ! skip the k-mesh block read by get_exciton_data
+    do ib=1,norb_ex_band
+      read(iounit10,*)
+    end do
+  end do
+
+  ibz_sum=0
+  write(*,*) '   Reading exciton wavefunctions...'
+  do ibz=1,norb_ex_cut
+    ibz_sum=ibz_sum+1
+    if (abs(dble(ibz)/dble(norb_ex_cut))*100.0d0-100.0d0 .lt. 5.0d0) then
+      call percentage_index(ibz_sum,norb_ex_cut,nkaka)
+    end if
+    read(iounit10,*,iostat=ios) (auxr1(j),j=1,2*norb_ex)
+    if (ios /= 0) then
+      write(*,*) 'ERROR (load_fk_ex): Exciton_cutoff =', norb_ex_cut, 'but ', trim(file2open)
+      write(*,*) '       holds only', ibz-1, 'exciton wavefunctions (the .eigval file listed more).'
+      write(*,*) '       Lower Exciton_cutoff, or rerun Xatu writing the states you asked for.'
+      stop 1
+    end if
+    do j=1,norb_ex
+      jind=2*j-1
+      fk_ex(j,ibz)=complex(auxr1(jind),auxr1(jind+1))
+    end do
+  end do
+  close(iounit10)
+  fk_ex_loaded = .true.
+
+end subroutine load_fk_ex
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 subroutine get_grid()

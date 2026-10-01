@@ -1,7 +1,8 @@
 module sigma_second_ex
   use constants_math
   use parser_input_file, &
-    only:e1,e2,eta,nw,response_text,broadening_type_text
+    only:e1,e2,eta,nw,response_text,broadening_type_text, &
+    freq_ratio,e1b,e2b,nwb,two_freq_grid,build_freq_pairs
   use parser_wannier90_tb, &
     only:material_name
   use parser_optics_xatu_dim, &
@@ -25,10 +26,26 @@ module sigma_second_ex
     !compute shift conductivity
     if (nwp.eq.1 .and. nwq.eq.(-1)) then
       call get_sigma_shift_ex()
-      !write(*,*) 'The optical response',response_text,'has been evaluated'
     end if
 
+    !compute shg susceptibility (omega_p = omega_q)
+    if (nwp.eq.1 .and. nwq.eq.1 .and. response_text == 'shg') then
+      call get_sigma_shg_ex()
+    end if
 
+    ! General second order at arbitrary (omega_p, omega_q). HANDOFF 8.37. get_sigma_general_ex picks
+    ! the observable from the frequency pair: Eq. (B1b) (position, method B) everywhere except on the
+    ! DC line omega_q = -omega_p, where Eq. (B1b) has no content (its terms 1-2 carry omega_2 = 0) and
+    ! the routine switches to Eq. (B1a) (method A) under the DC convention of HANDOFF 8.42.
+    if (response_text == 'electrooptic') then
+      freq_ratio = 0.0d0; two_freq_grid = .false.
+      call get_sigma_general_ex('electrooptic')
+    else if (response_text == 'rectification') then
+      freq_ratio = -1.0d0; two_freq_grid = .false.
+      call get_sigma_general_ex('rectification')   ! the DC branch: Eq. (B1a), omega_2 = 0 exactly
+    else if (response_text == 'general') then
+      call get_sigma_general_ex('general')
+    end if
 
 
   end subroutine get_sigma_second_ex
@@ -62,13 +79,11 @@ module sigma_second_ex
     call initialize_sigma_second_arrays(nw,wp,eta2,sigma_w_ex)
 	write(*,*) '    Evaluating shift conductivity (ex)...'
     
-    !call the subroutine to compute the shift conductivity
     if (.not. inter_terms_ready) then
       write(*,*) 'ERROR (sigma_second_ex): xme_ex_inter/vme_ex_inter not '// &
                 'populated — get_ome_ex must be called with iflag_norder=2 first.'
       stop 1
     end if
-!     call get_shift_intens_ex(wp,eta2,sigma_w_ex)
     call get_shift_intens_ex_matrix(wp,eta2,sigma_w_ex)
     ! symmetrise over the field indices (b,c)
     allocate(sigma_raw(3,3,3,nw))
@@ -86,6 +101,45 @@ module sigma_second_ex
     write(*,*) '    Shift conductivity (ex) has been printed'
   end subroutine get_sigma_shift_ex
 
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  ! Excitonic SHG driver. Method B (Taghizadeh & Pedersen, PRB 97, 205432, Eq. B1b): position
+  ! matrix elements only, frequency-chunked zgemm. Method B rather than A because vme_ex is the
+  ! bare momentum P_n, not the Heisenberg momentum Pi_n = -i E_n X_n that Eq. B1a requires
+  ! (see get_shg_intens_ex_matrix_methodB). Needs xme_ex_inter, i.e. the excitonic matrix
+  ! elements must have been computed with OME_ex = nonlinear.
+  ! The result is symmetrised over the two field indices, sigma^{abc} = sigma^{acb}: for
+  ! omega_p = omega_q this is the intrinsic permutation symmetry, and the raw kernel only has it
+  ! after symmetrisation (the term-3 pairing is not symmetric in b<->c).
+  subroutine get_sigma_shg_ex()
+    implicit none
+
+    integer    :: nj, njp, njpp
+    real(8)    :: wp(nw), eta2
+    complex(8) :: sigma_shg(3,3,3,nw)
+    complex(8), allocatable :: sigma_raw(:,:,:,:)   ! heap, not stack: 27*nw complex numbers
+
+    call initialize_sigma_second_arrays(nw,wp,eta2,sigma_shg)
+    write(*,*) '    Evaluating SHG susceptibility (ex)...'
+
+    if (.not. inter_terms_ready) then
+      write(*,*) 'ERROR (sigma_second_ex): xme_ex_inter/vme_ex_inter not '// &
+                'populated — get_ome_ex must be called with iflag_norder=2 first.'
+      stop 1
+    end if
+
+    allocate(sigma_raw(3,3,3,nw))
+    call get_shg_intens_ex_matrix_methodB(wp,eta2,sigma_raw)
+    do njpp = 1, 3
+      do njp = 1, 3
+        do nj = 1, 3
+          sigma_shg(nj,njp,njpp,:) = 0.5d0*(sigma_raw(nj,njp,njpp,:) + sigma_raw(nj,njpp,njp,:))
+        end do
+      end do
+    end do
+    deallocate(sigma_raw)
+    call print_shg_second_ex(nw,wp,sigma_shg)
+    write(*,*) '    SHG susceptibility (ex) has been printed'
+  end subroutine get_sigma_shg_ex
 
 
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
@@ -533,23 +587,640 @@ end subroutine get_shift_kernel_ex_freq
 ! SHG 
 
 
+! Frequency-independent matrix-element products. No mode branching --
+! the SHG response stays fully complex, so there's no aimag()-forcing
+! step the way the excitonic DC Lorentzian branch needed.
+! NOTE (method A, Eq. B1a): this takes Pi_n and Pi_nm from vme_ex / vme_ex_inter, which on
+! real data are the BARE momentum elements P_n, P_nm (Pi_n = P_n - i F_n, Eq. 10 of the paper),
+! so on real data it does not reproduce method B. It is correct only if the caller supplies
+! Pi_n = -i E_n X_n and Pi_nm = i (E_n - E_m) X_nm. Production runs use method B.
+subroutine get_shg_kernel_ex_static(nj, njp, njpp, nn, nnp, s1, s2, s3)
+  implicit none
+  integer,    intent(in)  :: nj, njp, njpp, nn, nnp
+  complex(8), intent(out) :: s1, s2, s3
 
+  s1 =  vme_ex(nj,nn)        * xme_ex_inter(njp,nn,nnp)        * conjg(xme_ex(njpp,nnp))
+  s2 =  conjg(vme_ex(nj,nn)) * conjg(xme_ex_inter(njp,nn,nnp)) * xme_ex(njpp,nnp)
+  s3 = -xme_ex(njp,nn)       * vme_ex_inter(nj,nn,nnp)         * conjg(xme_ex(njpp,nnp))
 
+end subroutine get_shg_kernel_ex_static
+
+! Frequency-dependent combination, evaluated at a single omega (SHG: ωp=ωq=omega).
+subroutine get_shg_kernel_ex_freq(eta2, omega, nn, nnp, s1, s2, s3, shg_kernel)
+  implicit none
+  real(8),    intent(in)  :: eta2, omega
+  integer,    intent(in)  :: nn, nnp
+  complex(8), intent(in)  :: s1, s2, s3
+  complex(8), intent(out) :: shg_kernel
+  complex(8) :: om2c, omqc, ompc, d1, d2, d3
+
+  omqc = cmplx(omega, eta2, 8)         ! omega_q + i*eta
+  ompc = cmplx(omega, eta2, 8)         ! omega_p + i*eta (SHG: numerically == omega_q, kept distinct for clarity)
+  om2c = ompc + omqc                   ! omega_2 = omega_p + omega_q -> 2*omega + 2i*eta (PRB 97, 205432: omega -> omega+i*eta for every frequency)
+
+  d1 = 1.0d0 / ( (om2c - e_ex(nn)) * (omqc - e_ex(nnp)) )
+  d2 = 1.0d0 / ( (om2c + e_ex(nn)) * (omqc + e_ex(nnp)) )
+  d3 = 1.0d0 / ( (omqc + e_ex(nn)) * (ompc - e_ex(nnp)) )
+
+  shg_kernel = -( s1*d1 + s2*d2 + s3*d3 )
+
+end subroutine get_shg_kernel_ex_freq
+
+subroutine get_shg_intens_ex(wp, eta2, sigma_shg)
+  implicit none
+  real(8),    intent(in)    :: wp(nw), eta2
+  complex(8), intent(inout) :: sigma_shg(3,3,3,nw)
+
+  integer     :: nj, njp, njpp, nn, nnp, iw
+  complex(8)  :: s1, s2, s3, kernel
+
+  sigma_shg = (0.0d0, 0.0d0)
+
+  do nn = 1, norb_ex_cut
+    do nnp = 1, norb_ex_cut
+      do nj = 1, 3
+        do njp = 1, 3
+          do njpp = 1, 3
+            call get_shg_kernel_ex_static(nj, njp, njpp, nn, nnp, s1, s2, s3)
+            do iw = 1, nw
+              call get_shg_kernel_ex_freq(eta2, wp(iw), nn, nnp, s1, s2, s3, kernel)
+              ! the kernel already carries the leading sign of Eq. (B1a), so accumulate it with +
+              sigma_shg(nj,njp,njpp,iw) = sigma_shg(nj,njp,njpp,iw) &
+                  + kernel / (dble(npointstotal)*vcell)
+            end do
+          end do
+        end do
+      end do
+    end do
+  end do
+
+end subroutine get_shg_intens_ex
 !!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+subroutine get_shg_kernel_ex_static_methodB(nj, njp, njpp, nn, nnp, s1, s2, s3)
+  implicit none
+  integer,    intent(in)  :: nj, njp, njpp, nn, nnp
+  complex(8), intent(out) :: s1, s2, s3
+
+  s1 = xme_ex(nj,nn)        * xme_ex_inter(njp,nn,nnp)        * conjg(xme_ex(njpp,nnp))
+  s2 = conjg(xme_ex(nj,nn)) * conjg(xme_ex_inter(njp,nn,nnp)) * xme_ex(njpp,nnp)
+  s3 = xme_ex(njp,nn)       * xme_ex_inter(nj,nn,nnp)         * conjg(xme_ex(njpp,nnp))
+
+end subroutine get_shg_kernel_ex_static_methodB
+
+subroutine get_shg_kernel_ex_freq_methodB(eta2, omega, nn, nnp, s1, s2, s3, shg_kernel)
+  implicit none
+  real(8),    intent(in)  :: eta2, omega
+  integer,    intent(in)  :: nn, nnp
+  complex(8), intent(in)  :: s1, s2, s3
+  complex(8), intent(out) :: shg_kernel
+  complex(8) :: omega_c, omega_2c, d1, d2, d3
+
+  omega_c  = cmplx(omega, eta2, 8)         ! omega_p = omega_q, + i*eta
+  omega_2c = omega_c + omega_c             ! omega_2 = omega_p + omega_q -> 2*omega + 2i*eta (must match method A)
+
+  d1 = 1.0d0 / ( (omega_2c - e_ex(nn)) * (omega_c - e_ex(nnp)) )
+  d2 = 1.0d0 / ( (omega_2c + e_ex(nn)) * (omega_c + e_ex(nnp)) )
+  d3 = 1.0d0 / ( (omega_c  + e_ex(nn)) * (omega_c - e_ex(nnp)) )
+
+  shg_kernel = cmplx(0.0d0,1.0d0,8)*omega_2c * ( s1*d1 + s2*d2 - s3*d3 )
+
+end subroutine get_shg_kernel_ex_freq_methodB
 
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Method A (Eq. B1a), zgemm version. Same caveat as get_shg_kernel_ex_static: it reads
+! Pi from vme_ex/vme_ex_inter. Use get_shg_intens_ex_matrix_methodB for production.
+subroutine get_shg_intens_ex_matrix(wp, eta2, sigma_shg)
+  implicit none
+  real(8),    intent(in)    :: wp(nw), eta2
+  complex(8), intent(inout) :: sigma_shg(3,3,3,nw)
 
+  integer, parameter :: nw_chunk = 2000
+  integer :: nj, njp, njpp, nn, nnp
+  integer :: iw0, iw1, nw_this, ichunk, nchunks
+  complex(8), parameter :: czero=(0.0d0,0.0d0), cone=(1.0d0,0.0d0)
 
+  complex(8), allocatable :: omega_c(:), omega2_c(:)         ! (nw_chunk) omega+i*eta and omega_2 = 2*(omega+i*eta)
+  complex(8), allocatable :: Mmat(:,:)
+  complex(8), allocatable :: Bmat(:,:), Wmat(:,:), Amat(:,:)
+  complex(8), allocatable :: term_total(:)
 
+  sigma_shg = (0.0d0, 0.0d0)
 
+  allocate(omega_c(nw_chunk), omega2_c(nw_chunk))
+  allocate(Mmat(norb_ex_cut,norb_ex_cut))
+  allocate(Bmat(norb_ex_cut,nw_chunk), Wmat(norb_ex_cut,nw_chunk), Amat(norb_ex_cut,nw_chunk))
+  allocate(term_total(nw_chunk))
 
+  nchunks = (nw + nw_chunk - 1) / nw_chunk
 
+  do ichunk = 1, nchunks
+    iw0     = (ichunk-1)*nw_chunk + 1
+    iw1     = min(iw0 + nw_chunk - 1, nw)
+    nw_this = iw1 - iw0 + 1
+
+    omega_c(1:nw_this)  = cmplx(    wp(iw0:iw1), eta2, 8)   ! omega_p and omega_q (SHG: same value)
+    omega2_c(1:nw_this) = omega_c(1:nw_this) + omega_c(1:nw_this)   ! omega_2 = omega_p + omega_q -> 2*omega + 2i*eta
+
+    ! ============ TERM 1: zgemm depends only on (njp,njpp) ============
+    do njp = 1, 3
+      do njpp = 1, 3
+        do nnp = 1, norb_ex_cut
+          Bmat(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) / (omega_c(1:nw_this) - e_ex(nnp))
+        end do
+        Mmat = xme_ex_inter(njp,:,:)
+        call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
+                    Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
+
+        do nj = 1, 3
+          do nn = 1, norb_ex_cut
+            Amat(nn,1:nw_this) = vme_ex(nj,nn) / (omega2_c(1:nw_this) - e_ex(nn))
+          end do
+          term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
+          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+              - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+        end do
+      end do
+    end do
+
+    ! ============ TERM 2: zgemm depends only on (njp,njpp) ============
+    do njp = 1, 3
+      do njpp = 1, 3
+        do nnp = 1, norb_ex_cut
+          Bmat(nnp,1:nw_this) = xme_ex(njpp,nnp) / (omega_c(1:nw_this) + e_ex(nnp))
+        end do
+        Mmat = conjg(xme_ex_inter(njp,:,:))
+        call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
+                    Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
+
+        do nj = 1, 3
+          do nn = 1, norb_ex_cut
+            Amat(nn,1:nw_this) = conjg(vme_ex(nj,nn)) / (omega2_c(1:nw_this) + e_ex(nn))
+          end do
+          term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
+          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+              - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+        end do
+      end do
+    end do
+
+    ! ============ TERM 3: unaffected, ω2 never appears here ============
+    do nj = 1, 3
+      do njpp = 1, 3
+        do nnp = 1, norb_ex_cut
+          Bmat(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) / (omega_c(1:nw_this) - e_ex(nnp))
+        end do
+        Mmat = vme_ex_inter(nj,:,:)
+        call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
+                    Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
+
+        do njp = 1, 3
+          do nn = 1, norb_ex_cut
+            Amat(nn,1:nw_this) = -xme_ex(njp,nn) / (omega_c(1:nw_this) + e_ex(nn))
+          end do
+          term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
+          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+              - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+        end do
+      end do
+    end do
+
+  end do
+
+  deallocate(omega_c, omega2_c, Mmat, Bmat, Wmat, Amat, term_total)
+
+end subroutine get_shg_intens_ex_matrix
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Method B (Taghizadeh & Pedersen, PRB 97, 205432, Eq. B1b), frequency-chunked zgemm
+! version. Uses ONLY the position matrix elements xme_ex, xme_ex_inter (no velocity
+! elements), so it does not depend on what vme_ex holds. This is the production
+! SHG routine: vme_ex/vme_ex_inter are the bare momentum P_n/P_nm, not the Heisenberg
+! momentum Pi_n=-iE_nX_n needed by Eq. B1a, so method A on those arrays is not the paper's
+! method A.
+!   sigma^{abc} = (i*omega_2/(Nk*V)) * sum_{nm} [  X_n^a X_nm^b X_m^c* /((w2-E_n)(w-E_m))
+!                                                + X_n^a* X_nm^b* X_m^c /((w2+E_n)(w+E_m))
+!                                                - X_n^b X_nm^a X_m^c* /((w+E_n)(w-E_m)) ]
+! with w = omega+i*eta and omega_2 = w + w = 2*omega + 2i*eta (paper convention).
+! Same conventions as get_shg_kernel_ex_*_methodB, which this routine must reproduce.
+! GENERALISED 2026-09-24 to arbitrary (omega_p, omega_q); see HANDOFF 8.37.
+! Taghizadeh & Pedersen PRB 97, 205432 (2018) Eq. (B1b), method B (position elements only):
+!
+!   sigma^B(2) = +C_ee (i hbar w2) sum_nm [  X_n X_nm X*_m / ((hw2 - E_n)(hw_q - E_m))
+!                                          + X*_n X*_nm X_m / ((hw2 + E_n)(hw_q + E_m))
+!                                          - X_n X_nm X*_m / ((hw_q + E_n)(hw_p - E_m)) ]
+!
+! Unlike the single-particle Eq. (A3a) -- where omega_q only ever entered through the sum (HANDOFF 8.36)
+! -- here omega_p appears ON ITS OWN, in the third term. So this kernel needs THREE complex frequencies:
+! hwp, hwq and hw2 = hwp + hwq. Note also that the third term of Eq. (A9b) is U_n O_nm U*_m, i.e. the
+! OBSERVABLE sits on the inter-exciton element there while in terms 1 and 2 it sits on the n element;
+! the existing index assignment (Mmat = xme_ex_inter(nj) in term 3 but (njp) in terms 1-2) is therefore
+! correct and is NOT a copy-paste slip.
+!
+! IMPORTANT: the prefactor is i*hbar*w2, so at w2 = 0 this expression vanishes IDENTICALLY. Method B
+! cannot produce optical rectification / the shift current; that is what get_shift_intens_ex is for
+! (it builds Pi from X and uses the DC convention of CLAUDE.md). The general driver guards against it.
+subroutine get_second_intens_ex_methodB(nfreq, hwp, hwq, hw2, sigma_shg)
+  implicit none
+  integer,    intent(in)    :: nfreq
+  complex(8), intent(in)    :: hwp(nfreq), hwq(nfreq), hw2(nfreq)
+  complex(8), intent(inout) :: sigma_shg(3,3,3,nfreq)
+
+  integer, parameter :: nw_chunk = 2000
+  integer :: nj, njp, njpp, nn, nnp
+  integer :: iw0, iw1, nw_this, ichunk, nchunks
+  complex(8), parameter :: ci=(0.0d0,1.0d0), czero=(0.0d0,0.0d0), cone=(1.0d0,0.0d0)
+
+  complex(8), allocatable :: omega_c(:), omega2_c(:), omegap_c(:), pref(:)
+  complex(8), allocatable :: Mmat(:,:)
+  complex(8), allocatable :: Bmat(:,:), Wmat(:,:), Amat(:,:)
+  complex(8), allocatable :: term_total(:)
+
+  sigma_shg = (0.0d0, 0.0d0)
+
+  allocate(omega_c(nw_chunk), omega2_c(nw_chunk), omegap_c(nw_chunk), pref(nw_chunk))
+  allocate(Mmat(norb_ex_cut,norb_ex_cut))
+  allocate(Bmat(norb_ex_cut,nw_chunk), Wmat(norb_ex_cut,nw_chunk), Amat(norb_ex_cut,nw_chunk))
+  allocate(term_total(nw_chunk))
+
+  nchunks = (nfreq + nw_chunk - 1) / nw_chunk
+
+  do ichunk = 1, nchunks
+    iw0     = (ichunk-1)*nw_chunk + 1
+    iw1     = min(iw0 + nw_chunk - 1, nfreq)
+    nw_this = iw1 - iw0 + 1
+
+    omega_c(1:nw_this)  = hwq(iw0:iw1)      ! omega_q: terms 1,2 (the X*_m/X_m pole) and term 3's +E_n
+    omegap_c(1:nw_this) = hwp(iw0:iw1)      ! omega_p: term 3's (hw_p - E_m) only
+    omega2_c(1:nw_this) = hw2(iw0:iw1)      ! omega_2 = omega_p + omega_q
+    pref(1:nw_this)     = ci*omega2_c(1:nw_this) / (dble(npointstotal)*vcell)
+
+    ! ============ TERM 1: zgemm depends only on (njp=b, njpp=c) ============
+    do njp = 1, 3
+      do njpp = 1, 3
+        do nnp = 1, norb_ex_cut
+          Bmat(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) / (omega_c(1:nw_this) - e_ex(nnp))
+        end do
+        Mmat = xme_ex_inter(njp,:,:)
+        call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
+                    Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
+        do nj = 1, 3
+          do nn = 1, norb_ex_cut
+            Amat(nn,1:nw_this) = xme_ex(nj,nn) / (omega2_c(1:nw_this) - e_ex(nn))
+          end do
+          term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
+          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+              + pref(1:nw_this)*term_total(1:nw_this)
+        end do
+      end do
+    end do
+
+    ! ============ TERM 2: zgemm depends only on (njp=b, njpp=c) ============
+    do njp = 1, 3
+      do njpp = 1, 3
+        do nnp = 1, norb_ex_cut
+          Bmat(nnp,1:nw_this) = xme_ex(njpp,nnp) / (omega_c(1:nw_this) + e_ex(nnp))
+        end do
+        Mmat = conjg(xme_ex_inter(njp,:,:))
+        call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
+                    Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
+        do nj = 1, 3
+          do nn = 1, norb_ex_cut
+            Amat(nn,1:nw_this) = conjg(xme_ex(nj,nn)) / (omega2_c(1:nw_this) + e_ex(nn))
+          end do
+          term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
+          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+              + pref(1:nw_this)*term_total(1:nw_this)
+        end do
+      end do
+    end do
+
+    ! ============ TERM 3 (enters with a minus sign): zgemm depends only on (nj=a, njpp=c) ============
+    do nj = 1, 3
+      do njpp = 1, 3
+        do nnp = 1, norb_ex_cut
+          ! Eq. (B1b) term 3 denominator is (hbar*omega_P - E_m) -- omega_p, NOT omega_q.
+          Bmat(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) / (omegap_c(1:nw_this) - e_ex(nnp))
+        end do
+        Mmat = xme_ex_inter(nj,:,:)
+        call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
+                    Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
+        do njp = 1, 3
+          do nn = 1, norb_ex_cut
+            Amat(nn,1:nw_this) = xme_ex(njp,nn) / (omega_c(1:nw_this) + e_ex(nn))
+          end do
+          term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
+          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+              - pref(1:nw_this)*term_total(1:nw_this)
+        end do
+      end do
+    end do
+
+  end do
+
+  deallocate(omega_c, omega2_c, omegap_c, pref, Mmat, Bmat, Wmat, Amat, term_total)
+
+end subroutine get_second_intens_ex_methodB
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! GENERAL excitonic second order via METHOD A, Taghizadeh & Pedersen PRB 97, 205432 (2018) Eq. (B1a):
+!
+!   sigma^A(2) = -C_ee sum_nm [  Pi_n X_nm X*_m / ((hw2 - E_n)(hw_q - E_m))
+!                              + Pi*_n X*_nm X_m / ((hw2 + E_n)(hw_q + E_m))
+!                              - X_n Pi_nm X*_m / ((hw_q + E_n)(hw_p - E_m)) ]
+!
+! WHY THIS EXISTS (HANDOFF 8.38): unlike Eq. (B1b), method A has NO i*hbar*omega_2 prefactor, so it does
+! NOT vanish at omega_2 = 0. It is therefore the route to the EXCITONIC OPTICAL RECTIFICATION / shift
+! current, which method B structurally cannot give.
+!
+! Pi is built from X INSIDE this routine, Pi_n = -i E_n X_n and Pi_nm = i(E_n - E_m) X_nm (paper Eq. 4a/4b;
+! CLAUDE.md "anything that needs Pi must build it from X"). It deliberately does NOT read vme_ex/
+! vme_ex_inter: those hold the BARE momentum P, not Pi, and feeding them to a method-A expression is the
+! documented trap that makes the result wrong by ~34% on hBN. Building Pi here makes that misuse impossible.
+!
+! Index roles follow Eq. (A9b) exactly, as in method B: in terms 1 and 2 the observable sits on the n
+! element (Amat carries a, Mmat carries b); in term 3 it sits on the INTER-exciton element (Mmat carries a,
+! Amat carries b).
+!> Excitonic second-order conductivity by method A, Eq. (B1a) of Taghizadeh & Pedersen,
+!! PRB 97, 205432 (2018): the Heisenberg-momentum (Pi) observable. Pi is built internally
+!! from X, never read from vme_ex, which holds the bare momentum P.
+!! Used where method B cannot be: Eq. (B1b) carries an overall i*hbar*omega_2 and is
+!! identically zero at omega_2 = 0.
+!! @param nfreq             Number of (omega_p, omega_q) pairs.
+!! @param hwp, hwq, hw2     Complex hbar*omega_p, hbar*omega_q and their sum.
+!! @param sigma_shg         Result, not yet symmetrised over the field indices.
+!! @return void
+subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg)
+  implicit none
+  integer,    intent(in)    :: nfreq
+  complex(8), intent(in)    :: hwp(nfreq), hwq(nfreq), hw2(nfreq)
+  complex(8), intent(inout) :: sigma_shg(3,3,3,nfreq)
+
+  integer, parameter :: nw_chunk = 2000
+  integer :: nj, njp, njpp, nn, nnp
+  integer :: iw0, iw1, nw_this, ichunk, nchunks
+  complex(8), parameter :: ci=(0.0d0,1.0d0), czero=(0.0d0,0.0d0), cone=(1.0d0,0.0d0)
+  complex(8), allocatable :: omega_c(:), omega2_c(:), omegap_c(:)
+  complex(8), allocatable :: Mmat(:,:), Bmat(:,:), Wmat(:,:), Amat(:,:), term_total(:)
+  real(8) :: prefA
+
+  sigma_shg = (0.0d0, 0.0d0)
+  prefA = -1.0d0/(dble(npointstotal)*vcell)      ! -C_ee, C_ee = 1 in these units (as in method B)
+
+  allocate(omega_c(nw_chunk), omega2_c(nw_chunk), omegap_c(nw_chunk))
+  allocate(Mmat(norb_ex_cut,norb_ex_cut))
+  allocate(Bmat(norb_ex_cut,nw_chunk), Wmat(norb_ex_cut,nw_chunk), Amat(norb_ex_cut,nw_chunk))
+  allocate(term_total(nw_chunk))
+
+  nchunks = (nfreq + nw_chunk - 1) / nw_chunk
+  do ichunk = 1, nchunks
+    iw0     = (ichunk-1)*nw_chunk + 1
+    iw1     = min(iw0 + nw_chunk - 1, nfreq)
+    nw_this = iw1 - iw0 + 1
+    omega_c(1:nw_this)  = hwq(iw0:iw1)
+    omegap_c(1:nw_this) = hwp(iw0:iw1)
+    omega2_c(1:nw_this) = hw2(iw0:iw1)
+
+    ! ---------------- TERM 1:  Pi_n X_nm X*_m / ((hw2 - E_n)(hw_q - E_m)) ----------------
+    do njp = 1, 3
+      do njpp = 1, 3
+        do nnp = 1, norb_ex_cut
+          Bmat(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) / (omega_c(1:nw_this) - e_ex(nnp))
+        end do
+        Mmat = xme_ex_inter(njp,:,:)
+        call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
+                    Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
+        do nj = 1, 3
+          do nn = 1, norb_ex_cut
+            ! Pi^a_n = -i E_n X^a_n
+            Amat(nn,1:nw_this) = (-ci*e_ex(nn)*xme_ex(nj,nn)) / (omega2_c(1:nw_this) - e_ex(nn))
+          end do
+          term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
+          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+              + prefA*term_total(1:nw_this)
+        end do
+      end do
+    end do
+
+    ! ---------------- TERM 2:  Pi*_n X*_nm X_m / ((hw2 + E_n)(hw_q + E_m)) ----------------
+    do njp = 1, 3
+      do njpp = 1, 3
+        do nnp = 1, norb_ex_cut
+          Bmat(nnp,1:nw_this) = xme_ex(njpp,nnp) / (omega_c(1:nw_this) + e_ex(nnp))
+        end do
+        Mmat = conjg(xme_ex_inter(njp,:,:))
+        call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
+                    Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
+        do nj = 1, 3
+          do nn = 1, norb_ex_cut
+            Amat(nn,1:nw_this) = conjg(-ci*e_ex(nn)*xme_ex(nj,nn)) / (omega2_c(1:nw_this) + e_ex(nn))
+          end do
+          term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
+          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+              + prefA*term_total(1:nw_this)
+        end do
+      end do
+    end do
+
+    ! ---------------- TERM 3 (minus):  X_n Pi_nm X*_m / ((hw_q + E_n)(hw_p - E_m)) ----------------
+    do nj = 1, 3
+      do njpp = 1, 3
+        do nnp = 1, norb_ex_cut
+          Bmat(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) / (omegap_c(1:nw_this) - e_ex(nnp))
+        end do
+        ! Pi^a_nm = i (E_n - E_m) X^a_nm
+        do nnp = 1, norb_ex_cut
+          do nn = 1, norb_ex_cut
+            Mmat(nn,nnp) = ci*(e_ex(nn)-e_ex(nnp))*xme_ex_inter(nj,nn,nnp)
+          end do
+        end do
+        call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
+                    Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
+        do njp = 1, 3
+          do nn = 1, norb_ex_cut
+            Amat(nn,1:nw_this) = xme_ex(njp,nn) / (omega_c(1:nw_this) + e_ex(nn))
+          end do
+          term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
+          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+              - prefA*term_total(1:nw_this)
+        end do
+      end do
+    end do
+  end do
+
+  deallocate(omega_c, omega2_c, omegap_c, Mmat, Bmat, Wmat, Amat, term_total)
+end subroutine get_second_intens_ex_methodA
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! SHG entry point, kept with its original signature so the long-validated driver and
+! tests/test_shg_real_data.f90 are untouched. It is now just the omega_q = omega_p branch of
+! get_second_intens_ex_methodB: hw_p = hw_q = omega + i*eta and hw2 = 2*omega + 2i*eta, which is
+! CLAUDE.md's rule that omega_2 must be the SUM of the two complex frequencies.
+subroutine get_shg_intens_ex_matrix_methodB(wp, eta2, sigma_shg)
+  implicit none
+  real(8),    intent(in)    :: wp(nw), eta2
+  complex(8), intent(inout) :: sigma_shg(3,3,3,nw)
+  complex(8), allocatable :: hwp(:), hwq(:), hw2(:)
+  integer :: iw
+  allocate(hwp(nw), hwq(nw), hw2(nw))
+  do iw = 1, nw
+    hwp(iw) = cmplx(wp(iw), eta2, 8)
+    hwq(iw) = hwp(iw)
+    hw2(iw) = hwp(iw) + hwq(iw)
+  end do
+  call get_second_intens_ex_methodB(nw, hwp, hwq, hw2, sigma_shg)
+  deallocate(hwp, hwq, hw2)
+end subroutine get_shg_intens_ex_matrix_methodB
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! GENERAL excitonic second-order conductivity sigma^{abc}(w_p+w_q; w_p, w_q), Eq. (B1b).
+! Mirrors get_sigma_general_sp (HANDOFF 8.36): the physical tensor is the intrinsic-permutation
+! average over the PAIRS (alpha,w_p) <-> (beta,w_q),
+!     sigma_sym^{a,b,c}(wp,wq) = 1/2 [ sigma^{a,b,c}(wp,wq) + sigma^{a,c,b}(wq,wp) ],
+! implemented as two passes with (hwp,hwq) swapped, the second transposed in (b,c). For w_p = w_q the
+! two passes coincide and it degenerates to the plain b<->c swap get_sigma_shg_ex already did.
+!> Driver for the excitonic two-frequency response sigma^abc(w1+w2; w1, w2): builds the
+!! frequency pairs, picks method A or B, symmetrises and writes the result.
+!! On the 1D w_q = -w_p scan it switches to the DC convention -- w_q = -w_p as complex
+!! numbers, w_2 = 0 exactly, b<->c index symmetrisation at fixed frequencies and Re at the
+!! end -- because Eq. (B1a) term 3 cancels by time reversal only when its denominator
+!! (hw_q + E_n)(hw_p - E_m) is symmetric under n<->m, which needs w_q = -w_p exactly.
+!! The 2D map deliberately keeps the resonant-branch convention even at its isolated
+!! w_2 = 0 points, so its anti-diagonal is a sum-frequency response, NOT a shift current.
+!! @param tag  'electrooptic', 'rectification' or 'general'; names the output file.
+!! @return void
+subroutine get_sigma_general_ex(tag)
+  implicit none
+  character(len=*), intent(in) :: tag
+  integer :: nfreq, idx, nj, njp, njpp
+  real(8) :: eta2
+  real(8),    allocatable :: wpg(:), wqg(:)
+  complex(8), allocatable :: hwp(:), hwq(:), hw2(:)
+  complex(8), allocatable :: sigA(:,:,:,:), sigB(:,:,:,:), sigS(:,:,:,:)
+  logical :: same_freq, use_methodA, dc_branch
+
+  if (.not. inter_terms_ready) then
+    write(*,*) 'ERROR (sigma_second_ex): xme_ex_inter not populated -- get_ome_ex needs iflag_norder=2.'
+    stop 1
+  end if
+
+  eta2 = eta/27.211385d0
+  call build_freq_pairs(nfreq, wpg, wqg)
+
+  ! DC BRANCH (HANDOFF 8.42). On the 1D r = -1 scan (w_q = -w_p, i.e. Response = rectification)
+  ! the broadening convention is NOT the resonant-branch one. Eq. (B1a) term 3's denominator
+  !     D_nm = (hbar w_q + E_n)(hbar w_p - E_m)
+  ! is symmetric under n <-> m only if w_q = -w_p as COMPLEX numbers: then D_nm = (E_n - z)(z - E_m)
+  ! with z = w + i*eta, and (E_m - z)(z - E_n) is the same product. With X real and Pi antisymmetric
+  ! (time reversal, paper Appendix B) the numerator is antisymmetric under n <-> m combined with
+  ! b <-> c, so term 3 then cancels EXACTLY under the b <-> c symmetrisation (measured: 1.8e-7 of
+  ! terms 1+2). Under the resonant-branch convention w_q = -w + i*eta the denominator is instead
+  ! (E_n - conjg(z))(z - E_m), which is NOT symmetric; term 3 survives with a 1/eta^2 double pole at
+  ! the near-degenerate exciton pairs (38234 pairs with |E_n - E_m| < eta in the hBN IPA-limit set)
+  ! and then EXCEEDS terms 1+2 (measured 1.95x). That is what made this branch fail the IPA limit.
+  ! As 8.38b/8.38c record, w_q = -w_p is incompatible with the (alpha,w_p) <-> (beta,w_q) PAIR
+  ! average, which annihilates the result identically; the Eq. 9 shift route avoids the clash by
+  ! symmetrising over the INDICES b <-> c only, at fixed frequencies, so the DC branch does the same.
+  ! RESTRICTED to the 1D r = -1 scan on purpose: on the 2D grid only isolated points have w_2 = 0 and
+  ! switching prescription there would put an O(1) discontinuity along the anti-diagonal (8.38c), so
+  ! the map keeps the convention it was validated with.
+  dc_branch = (.not. two_freq_grid) .and. (abs(freq_ratio + 1.0d0) < 1.0d-8)
+
+  allocate(hwp(nfreq), hwq(nfreq), hw2(nfreq))
+  do idx = 1, nfreq
+    hwp(idx) = cmplx(wpg(idx), eta2, 8)
+    if (dc_branch) then
+      hwq(idx) = -hwp(idx)                 ! omega-only broadening: the SAME complex z, used as -z
+      hw2(idx) = (0.0d0, 0.0d0)            ! exactly zero (no eta on the w_2 pole)
+    else
+      hwq(idx) = cmplx(wqg(idx), eta2, 8)
+      hw2(idx) = hwp(idx) + hwq(idx)
+    end if
+  end do
+
+  ! METHOD SELECTION (HANDOFF 8.38). Eq. (B1b) (method B) carries an overall i*hbar*omega_2 and so is
+  ! identically ZERO at omega_2 = 0. Eq. (B1a) (method A) has no such prefactor and stays finite there,
+  ! so rectification -- and any grid point with omega_2 ~ 0 -- must go through method A. The two are
+  ! equivalent wherever both are defined (paper Sec. III; verified here at r = 1), so B stays the default
+  ! for the resonant branches where it is the long-validated production route.
+  use_methodA = (.not. two_freq_grid) .and. (abs(freq_ratio + 1.0d0) < 1.0d-8)
+  if (two_freq_grid) then
+    if (minval(abs(wpg+wqg)) < 1.0d-8) use_methodA = .true.
+  end if
+
+  same_freq = (.not. two_freq_grid) .and. (abs(freq_ratio - 1.0d0) < 1.0d-12)
+  allocate(sigA(3,3,3,nfreq), sigB(3,3,3,nfreq), sigS(3,3,3,nfreq))
+  sigA = (0.0d0,0.0d0); sigB = (0.0d0,0.0d0)
+
+  write(*,*) '    Evaluating second-order conductivity (ex): ', trim(tag)
+  if (use_methodA) then
+    write(*,'(A,I0,A,I0,A)') '        ', nfreq, ' frequency pairs, ', norb_ex_cut, &
+                             ' excitons  [method A, Eq. (B1a): omega_2 = 0 is in range]'
+    if (dc_branch) write(*,'(A)') "        DC branch: w_q = -w_p, w_2 = 0, b<->c symmetrisation only"
+    call get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigA)
+    if (same_freq .or. dc_branch) then
+      sigB = sigA                          ! dc_branch: b<->c index symmetrisation at FIXED
+    else                                   ! frequencies (Eq. 9 prescription), NO pair average
+      call get_second_intens_ex_methodA(nfreq, hwq, hwp, hw2, sigB)
+    end if
+  else
+    write(*,'(A,I0,A,I0,A)') '        ', nfreq, ' frequency pairs, ', norb_ex_cut, &
+                             ' excitons  [method B, Eq. (B1b)]'
+    call get_second_intens_ex_methodB(nfreq, hwp, hwq, hw2, sigA)
+    if (same_freq) then
+      sigB = sigA
+    else
+      call get_second_intens_ex_methodB(nfreq, hwq, hwp, hw2, sigB)
+    end if
+  end if
+
+  do nj = 1,3
+    do njp = 1,3
+      do njpp = 1,3
+        sigS(nj,njp,njpp,:) = 0.5d0*(sigA(nj,njp,njpp,:) + sigB(nj,njpp,njp,:))
+      end do
+    end do
+  end do
+
+  ! DC branch: sigma(0; w, -w) is REAL (Sipe & Shkrebtii 2000 Sec. VII; verified here to 1e-12 on the
+  ! resonant-convention branch). Keeping Re is exactly equivalent to get_shift_kernel_ex_static's
+  ! S -> Re[S] projection (SI Note 5 of npj Comput. Mater. 11, 13): that projection is a measured no-op
+  ! on Re (1.8e-7 relative, HANDOFF 8.42) while the projected result is real by construction, so
+  ! Re[sigma_unprojected] = sigma_projected. Without this the dispersive residue survives as a spurious
+  ! Im at 66% of Re.
+  if (dc_branch) sigS = cmplx(dble(sigS), 0.0d0, 8)
+
+  call print_second_general_ex(nfreq, wpg, wqg, sigS, tag)
+  deallocate(wpg, wqg, hwp, hwq, hw2, sigA, sigB, sigS)
+end subroutine get_sigma_general_ex
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Same layout as the single-particle general writer: hbar*w_p (eV), hbar*w_q (eV), then 54 (Re, Im).
+subroutine print_second_general_ex(nfreq, wpg, wqg, sigma, tag)
+  implicit none
+  integer :: iounit94
+  integer,    intent(in) :: nfreq
+  real(8),    intent(in) :: wpg(nfreq), wqg(nfreq)
+  complex(8), intent(in) :: sigma(3,3,3,nfreq)
+  character(len=*), intent(in) :: tag
+  integer :: iw, ia, ib, ic
+  real(8) :: feps
+  feps = sigma2_au_to_si
+  open(newunit=iounit94, file='second_ex_'//trim(tag)//'_lengthgauge_'//trim(material_name)//'.dat')
+  write(iounit94,'(A)') '# hbar*w_p(eV) hbar*w_q(eV) | excitonic sigma^{abc}(w_p+w_q;w_p,w_q) (Re,Im) uA nm/V^2, abc=xxx,...,zzz'
+  do iw = 1, nfreq
+    write(iounit94,'(2ES18.10,54ES18.10)') wpg(iw)*27.211385d0, wqg(iw)*27.211385d0, &
+      ( ( ( real(feps*sigma(ia,ib,ic,iw)), aimag(feps*sigma(ia,ib,ic,iw)), ic=1,3 ), ib=1,3 ), ia=1,3 )
+  end do
+  close(iounit94)
+end subroutine print_second_general_ex
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine print_sigma_second_ex(nw, wp, sigma_w_ex)
     use omp_lib
     implicit none
+    integer :: iounit90
 
     integer,    intent(in) :: nw
     real(8),    intent(in) :: wp(nw)
@@ -562,15 +1233,15 @@ end subroutine get_shift_kernel_ex_freq
     !d=2.6d0 !thickness in angstrongs for MoS2
     !d=3.28d0 !thickness in angstrongs for h-BN
     !feps=feps/(d/0.52917721067121d0) 
-    feps=(6.623618d-03)*(1.0d+06)*(27.211386**(-2))*(5.291772d-11)*(1.0d+09) !%go from au to (\mu A /V^2)*nm
+    feps = sigma2_au_to_si !%go from au to (\mu A /V^2)*nm
    
-    open(90, file='shift_ex_lengthgauge_'//trim(material_name)//'.dat')
+    open(newunit=iounit90, file='shift_ex_lengthgauge_'//trim(material_name)//'.dat')
 
     ! serial on purpose (audit 2026-09-24): this loop is pure file I/O and every iteration was
     ! inside !$omp ordered, which serialises it completely -- the parallel wrapper only added
     ! thread spawn and synchronisation cost. HANDOFF 8.35.
     do iw = 1, nw
-      write(90,*) wp(iw)*27.211385d0, &
+      write(iounit90,*) wp(iw)*27.211385d0, &
         realpart(feps*sigma_w_ex(1,1,1,iw)), realpart(feps*sigma_w_ex(1,1,2,iw)), &
         realpart(feps*sigma_w_ex(1,1,3,iw)), realpart(feps*sigma_w_ex(1,2,1,iw)), &
         realpart(feps*sigma_w_ex(1,2,2,iw)), realpart(feps*sigma_w_ex(1,2,3,iw)), &
@@ -587,7 +1258,7 @@ end subroutine get_shift_kernel_ex_freq
         realpart(feps*sigma_w_ex(3,3,3,iw))
     end do
 
-    close(90)
+    close(iounit90)
 
   end subroutine print_sigma_second_ex
 
@@ -607,24 +1278,25 @@ end subroutine get_shift_kernel_ex_freq
   ! examined here.
   subroutine print_shg_second_ex(nw, wp, sigma_shg)
     implicit none
+    integer :: iounit91
     integer,    intent(in) :: nw
     real(8),    intent(in) :: wp(nw)
     complex(8), intent(in) :: sigma_shg(3,3,3,nw)
     integer :: iw, ia, ib, ic
     real(8) :: feps
 
-    feps = (6.623618d-03)*(1.0d+06)*(27.211386d0**(-2))*(5.291772d-11)*(1.0d+09)
+    feps = sigma2_au_to_si
 
-    open(91, file='shg_ex_lengthgauge_'//trim(material_name)//'.dat')
-    write(91,'(A)') '# hbar*omega(eV) [FUNDAMENTAL, not 2*hbar*omega] | sigma^{abc}(2w;w,w) (Re, Im) in uA nm/V^2, abc = xxx,xxy,xxz,xyx,...,zzz'
+    open(newunit=iounit91, file='shg_ex_lengthgauge_'//trim(material_name)//'.dat')
+    write(iounit91,'(A)') '# hbar*omega(eV) [FUNDAMENTAL, not 2*hbar*omega] | sigma^{abc}(2w;w,w) (Re, Im) in uA nm/V^2, abc = xxx,xxy,xxz,xyx,...,zzz'
 
     do iw = 1, nw
-      write(91,'(ES18.10,54ES18.10)') wp(iw)*27.211385d0, &
+      write(iounit91,'(ES18.10,54ES18.10)') wp(iw)*27.211385d0, &
         ( ( ( real(feps*sigma_shg(ia,ib,ic,iw)), aimag(feps*sigma_shg(ia,ib,ic,iw)), &
               ic=1,3 ), ib=1,3 ), ia=1,3 )
     end do
 
-    close(91)
+    close(iounit91)
 
   end subroutine print_shg_second_ex
 !!!!

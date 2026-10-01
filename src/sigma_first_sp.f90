@@ -98,19 +98,20 @@ module sigma_first_sp
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine print_sigma_first_sp(nw,wp,sigma_w_sp)
     implicit none
+    integer :: iounit55
+    integer :: iounit50
     integer,    intent(in) :: nw
     integer                :: iw
     real(8),    intent(in) :: wp(nw)
     complex(8),intent(in) :: sigma_w_sp(3,3,nw)
     real(8)                :: feps
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
-    !write frequency dependent conductivity	  
-    open(50,file='sigma_first_sp_real_'//trim(material_name)//'.dat')
-    open(55,file='sigma_first_sp_imag_'//trim(material_name)//'.dat')
+    open(newunit=iounit50,file='sigma_first_sp_real_'//trim(material_name)//'.dat')
+    open(newunit=iounit55,file='sigma_first_sp_imag_'//trim(material_name)//'.dat')
 
     do iw=1,nw
       feps=1.0d0 !use atomic units
-      write(50,*) wp(iw)*27.211385d0, &
+      write(iounit50,*) wp(iw)*27.211385d0, &
         realpart(feps*sigma_w_sp(1,1,iw)), &
         realpart(feps*sigma_w_sp(1,2,iw)), &
         realpart(feps*sigma_w_sp(1,3,iw)), &
@@ -121,7 +122,7 @@ module sigma_first_sp
         realpart(feps*sigma_w_sp(3,2,iw)), &
         realpart(feps*sigma_w_sp(3,3,iw))
   
-      write(55,*) wp(iw)*27.211385d0,aimag(feps*sigma_w_sp(1,1,iw)), &
+      write(iounit55,*) wp(iw)*27.211385d0,aimag(feps*sigma_w_sp(1,1,iw)), &
           aimag(feps*sigma_w_sp(1,2,iw)), &
           aimag(feps*sigma_w_sp(1,3,iw)), &
           aimag(feps*sigma_w_sp(2,1,iw)), &
@@ -133,8 +134,8 @@ module sigma_first_sp
       
     end do
 
-    close(50)
-    close(55)
+    close(iounit50)
+    close(iounit55)
 
   end subroutine print_sigma_first_sp
 

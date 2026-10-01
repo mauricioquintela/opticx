@@ -14,13 +14,15 @@ opticx computes the **linear and nonlinear optical response of crystals**, both 
 independent-particle level and including excitonic effects. Starting from a Wannier90 tight-binding
 model — and, optionally, exciton eigenstates obtained with
 [Xatu](https://github.com/alejandrojuria/xatu) — it evaluates the first- and second-order optical
-conductivities: absorbance, and shift current. Second-harmonic generation, the electro-optic (Pockels) effect and optical rectification are currently being implemented. All of the second-order processes are branches of one general
-two-frequency response σ(ω₁+ω₂; ω₁, ω₂), which will soon be able to be scanned as a full two-dimensional map.
+conductivities: absorbance, second-harmonic generation, the electro-optic (Pockels) effect, optical
+rectification and the shift current. All of the second-order processes are branches of one general
+two-frequency response σ(ω₁+ω₂; ω₁, ω₂), which can also be scanned as a full two-dimensional map.
+
 
 The theory behind the code, the conventions it follows and usage examples are described in the
 [documentation](#documentation). The implementation follows
 [Esteve-Paredes *et al.*, *npj Computational Materials* **11**, 13 (2025)](https://doi.org/10.1038/s41524-024-01504-2);
-if you find the code useful, please consider citing it.
+usage of the code requires citing the paper.
 
 ## Installation
 
@@ -80,12 +82,15 @@ file reference, the output formats, the conventions the code follows (frequency 
 units — worth reading before comparing numbers with a paper), the second-order theory, and the
 validation suite.
 
-To build it locally:
+The documentation lives in its own repository rather than in this one, so it can be edited and
+rebuilt without touching the code. To build it locally, clone that repository and use a virtual
+environment (it needs `sphinx-rtd-theme`, which most system Pythons do not have):
 ```
-pip install -r docs/requirements.txt
-sphinx-build docs docs/_build
+python3 -m venv .venv
+.venv/bin/pip install -r docs/requirements.txt
+.venv/bin/sphinx-build -b html docs docs/_build/html
 ```
-and open `docs/_build/index.html`.
+and open `docs/_build/html/index.html`.
 
 ## License
 

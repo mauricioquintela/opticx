@@ -104,6 +104,7 @@ module bands
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine get_eigenenergies(npointstotal_path)
     implicit none
+    integer :: iounit10
     
     integer npointstotal_path
     integer ialpha
@@ -125,9 +126,8 @@ module bands
     complex*16 phase,factor
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  
-    open(10,file='bands_'//trim(material_name)//'.dat')	   	  
+    open(newunit=iounit10,file='bands_'//trim(material_name)//'.dat')	   	  
 	  do ibz=1,npointstotal_path
-        !write(*,*) 'point:',ibz,npointstotal_path        
         rkx=rkxvector_path(ibz)
         rky=rkyvector_path(ibz)
         rkz=rkzvector_path(ibz)
@@ -153,12 +153,11 @@ module bands
         end do 
         call diagoz(norb,e,hkernel)  
 
-        write(10,*) rkx,rky,rkz,rklengthvector_path(ibz),(e(j)*27.211385d0,j=1,norb)
+        write(iounit10,*) rkx,rky,rkz,rklengthvector_path(ibz),(e(j)*27.211385d0,j=1,norb)
         !if (rkx.eq.0.0d0 .and. rky.eq.0.0d0) then
-          !write(*,*) 'eigenenergies:',e(60)*27.211385d0,e(61)*27.211385d0,(e(61)-e(60))*27.211385d0
         !end if
 	  end do
-    close(10)
+    close(iounit10)
 
 
   end subroutine get_eigenenergies

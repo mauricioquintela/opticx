@@ -1,0 +1,20 @@
+# Periodic dimensions
+2
+# Wannier90_filename
+@ROOT@/hBN_tb.dat
+# Xatu_interface
+true
+@ROOT@/hBN_N30.eigval
+@ROOT@/hBN_N30.states
+# Exciton_cutoff
+100
+# Nfermi
+1
+# OME_sp
+nonlinear
+# OME_ex
+nonlinear
+# Response
+none
+# Energy_variables
+2.0 4.6 0.05 200

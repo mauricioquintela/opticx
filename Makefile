@@ -79,6 +79,7 @@ $(TARGET): $(OBJ_MODULES) $(OBJ_MAIN)
 $(BINDIR)/opticx.o: $(SRC_MAIN) | $(BINDIR) $(BUILDDIR)
 	$(FC) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@
 
+
 # -----------------------------------------------------------------
 # Module dependencies
 # -----------------------------------------------------------------
@@ -112,7 +113,8 @@ $(BUILDDIR)/ome_ex.o: \
 	$(BUILDDIR)/constants_math.o \
 	$(BUILDDIR)/parser_wannier90_tb.o \
 	$(BUILDDIR)/parser_optics_xatu_dim.o \
-	$(BUILDDIR)/exciton_envelopes.o 
+	$(BUILDDIR)/exciton_envelopes.o \
+	$(BUILDDIR)/ome_sp.o 
 
 $(BUILDDIR)/ome.o: \
 	$(BUILDDIR)/parser_input_file.o \
@@ -172,6 +174,43 @@ $(BINDIR)/test_shift_intens_ex_matrix: $(OBJ_MODULES) $(BINDIR)/test_shift_inten
 $(BINDIR)/test_shift_intens_ex_matrix.o: tests/test_shift_intens_ex_matrix.f90 | $(BUILDDIR) $(BINDIR)
 	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
 
+test_shg_consistency: $(BINDIR)/test_shg_consistency
+
+$(BINDIR)/test_shg_consistency: $(OBJ_MODULES) $(BINDIR)/test_shg_consistency.o
+	$(FC) $(FFLAGS) $(OBJ_MODULES) $(BINDIR)/test_shg_consistency.o -o $@ $(LIBS)
+
+$(BINDIR)/test_shg_consistency.o: tests/test_shg_consistency.f90 | $(BUILDDIR) $(BINDIR)
+	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
+
+test_shg_real_data: $(BINDIR)/test_shg_real_data
+
+$(BINDIR)/test_shg_real_data: $(OBJ_MODULES) $(BINDIR)/test_shg_real_data.o
+	$(FC) $(FFLAGS) $(OBJ_MODULES) $(BINDIR)/test_shg_real_data.o -o $@ $(LIBS)
+
+$(BINDIR)/test_shg_real_data.o: tests/test_shg_real_data.f90 | $(BUILDDIR) $(BINDIR)
+	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
+
+# Runs the real-data SHG test in bin/test_run (the pipeline writes output files into the cwd)
+run_test_shg_real: $(BINDIR)/test_shg_real_data
+	mkdir -p $(BINDIR)/test_run
+	sed 's|@ROOT@|$(CURDIR)|g' tests/test_shg_real_data.in > $(BINDIR)/test_run/in.txt
+	cd $(BINDIR)/test_run && ../test_shg_real_data in.txt
+	-python3 tools/plot_test_outputs.py $(BINDIR)/test_run/shg_real_data_spectra.dat
+
+test_second_symmetry: $(BINDIR)/test_second_symmetry
+
+$(BINDIR)/test_second_symmetry: $(OBJ_MODULES) $(BINDIR)/test_second_symmetry.o
+	$(FC) $(FFLAGS) $(OBJ_MODULES) $(BINDIR)/test_second_symmetry.o -o $@ $(LIBS)
+
+$(BINDIR)/test_second_symmetry.o: tests/test_second_symmetry.f90 | $(BUILDDIR) $(BINDIR)
+	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
+
+# Symmetry of the general two-frequency branch at r = w_q/w_p other than 1 (HANDOFF 8.43)
+run_test_second_symmetry: $(BINDIR)/test_second_symmetry
+	mkdir -p $(BINDIR)/test_run_sym
+	sed 's|@ROOT@|$(CURDIR)|g' tests/test_second_symmetry.in > $(BINDIR)/test_run_sym/in.txt
+	cd $(BINDIR)/test_run_sym && ../test_second_symmetry in.txt
+
 test_shift_real_data: $(BINDIR)/test_shift_real_data
 
 $(BINDIR)/test_shift_real_data: $(OBJ_MODULES) $(BINDIR)/test_shift_real_data.o
@@ -187,13 +226,26 @@ run_test_shift_real: $(BINDIR)/test_shift_real_data
 	cd $(BINDIR)/test_run_shift && ../test_shift_real_data in.txt
 	-python3 tools/plot_test_outputs.py $(BINDIR)/test_run_shift/shift_real_data_spectra.dat
 
+# Runs the synthetic SHG consistency test in bin/test_run_shg and plots its spectrum
+run_test_shg_consistency: $(BINDIR)/test_shg_consistency
+	mkdir -p $(BINDIR)/test_run_shg
+	cd $(BINDIR)/test_run_shg && ../test_shg_consistency
+	-python3 tools/plot_test_outputs.py $(BINDIR)/test_run_shg/shg_consistency_spectra.dat
+
 # Regression check of the single-particle shift (sp vs exact IPA and vs the excitonic IPA limit on non-interacting hBN)
 check_sp_shift: $(TARGET)
 	python3 tools/check_sp_shift.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_sp_shift
 
+check_sp_shg: $(TARGET)
+	python3 tools/check_sp_shg.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_sp_shg
+
 # Cache_ome_ex: the five modes, asserting both behaviour and what the run says about itself (8.44/8.45)
 check_ome_cache: $(TARGET)
 	python3 tools/check_ome_cache.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_ome_cache
+
+# Eq. (A4) basis guard: OME_sp = none must refuse the excitonic path unless a cache covers it (8.46)
+check_a4_basis_guard: $(TARGET)
+	python3 tools/check_a4_basis_guard.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_a4
 
 # -----------------------------------------------------------------
 # Clean

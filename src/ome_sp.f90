@@ -145,7 +145,7 @@ subroutine get_ome_sp(iflag_norder)
 
       integer :: kmoment
 
-      complex*16, allocatable :: gen_der(:,:,:,:), vme_der(:,:,:,:)
+      complex*16, allocatable :: gen_der(:,:,:,:), vme_der(:,:,:,:), vme_der_pt(:,:,:,:)
       real(8),    allocatable :: vme_abs_der(:,:,:,:)
       complex*16, allocatable :: gd1(:,:,:,:), gd2(:,:,:,:), gd3(:,:,:,:)
       complex*16, allocatable :: hk_ev_neigh(:,:,:), vme_neigh(:,:,:,:)
@@ -167,6 +167,7 @@ subroutine get_ome_sp(iflag_norder)
       complex*16, allocatable :: gen_der_ex_band(:,:,:,:,:)
       real(8),    allocatable :: shift_vector_ex_band(:,:,:,:,:)
       real(8),    allocatable :: vme_abs_der_ex_band(:,:,:,:,:)   ! (ibz, deriv a, pol c, i, j): d_a |v^c_{ij}|
+      complex*16, allocatable :: vme_der_pt_ex_band(:,:,:,:,:)    ! (ibz, deriv a, pol c, i, j): (v^c_ij);k^a, gauge-fixed
 
       real(8) :: rkx,rky,rkz
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -181,9 +182,11 @@ subroutine get_ome_sp(iflag_norder)
       allocate(gen_der_ex_band(npointstotal,3,3,nband_ex,nband_ex))
       allocate(shift_vector_ex_band(npointstotal,3,3,nband_ex,nband_ex))
       allocate(vme_abs_der_ex_band(npointstotal,3,3,nband_ex,nband_ex))
+      allocate(vme_der_pt_ex_band(npointstotal,3,3,nband_ex,nband_ex))
       if (allocated(a4_W)) deallocate(a4_W)
       allocate(a4_W(npointstotal,nband_ex,nband_ex)); a4_W=(0.0d0,0.0d0)
       vme_abs_der_ex_band=0.0d0
+      vme_der_pt_ex_band=0.0d0
       gen_der_ex_band=0.0d0
       shift_vector_ex_band=0.0d0
       berry_eigen_ex_band=0.0d0
@@ -203,7 +206,7 @@ subroutine get_ome_sp(iflag_norder)
       !$OMP PRIVATE(hk_ev,e,vme), &
       !$OMP PRIVATE(abc,gen_der,gd1,gd2,gd3), &
       !$OMP PRIVATE(vme_der,vme_abs_der,shift_vector,berry_eigen1,berry_eigen2,berry_eigen), &
-      !$OMP PRIVATE(hk_ev_neigh,vme_neigh,vme_der_phase)&
+      !$OMP PRIVATE(hk_ev_neigh,vme_neigh,vme_der_phase,vme_der_pt)&
       !$OMP PRIVATE(M1,T1)&                                    ! NEW
       !$OMP PRIVATE(Wfull,Wblk_chk)&                           ! NEW: per-k basis change (Eq. A4)
       !$OMP   SHARED(kmoment), &
@@ -212,7 +215,7 @@ subroutine get_ome_sp(iflag_norder)
       !$OMP   SHARED(rkxvector,rkyvector,rkzvector), &
       ! outputs, written only at the disjoint index ibz owned by this thread:
       !$OMP   SHARED(ek,vme_ex_band,berry_eigen_ex_band,gen_der_ex_band), &
-      !$OMP   SHARED(shift_vector_ex_band,vme_abs_der_ex_band,a4_W), &
+      !$OMP   SHARED(shift_vector_ex_band,vme_abs_der_ex_band,vme_der_pt_ex_band,a4_W), &
       ! double-checked flag: unguarded read is benign, the write is inside !$omp critical:
       !$OMP   SHARED(a4_W_straddle_warned)
 
@@ -220,6 +223,7 @@ subroutine get_ome_sp(iflag_norder)
       allocate(sderkernel(norb,norb,3), hderkernel(norb,norb,3))
       allocate(akernel(norb,norb,3))
       allocate(gen_der(norb,norb,3,3), vme_der(norb,norb,3,3), vme_abs_der(norb,norb,3,3))
+      allocate(vme_der_pt(norb,norb,3,3))
       allocate(gd1(norb,norb,3,3), gd2(norb,norb,3,3), gd3(norb,norb,3,3))
       allocate(hk_ev_neigh(norb,norb,7), vme_neigh(norb,norb,3,7))
       allocate(vme_der_phase(norb,norb,3,3))
@@ -227,7 +231,12 @@ subroutine get_ome_sp(iflag_norder)
 
       !$OMP DO SCHEDULE(STATIC)
       do ibz=1,npointstotal
-            write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
+            ! Progress, not a transcript -- see the matching note in ome_ex.f90. This loop printed one
+            ! line per k-point, 2025 of them on a 45x45 run, and it is also the loop that emits the
+            ! Eq. (A4) straddle WARNING below: a real diagnostic was being hidden inside its own
+            ! progress output.
+            if (mod(ibz, max(1, npointstotal/10)) == 0) &
+              write(*,*) '   Optical matrix elements (sp): k-point',ibz,'/',npointstotal
             rkx=rkxvector(ibz)
             rky=rkyvector(ibz)
             rkz=rkzvector(ibz)
@@ -266,7 +275,7 @@ subroutine get_ome_sp(iflag_norder)
                         shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
                         hk_ev_neigh,vme_neigh, &
                         skernel,hkernel,sderkernel,hderkernel,akernel,vme_der_phase, &
-                        M1,T1)
+                        M1,T1,vme_der_pt)                                ! CHANGED: M1,T1,vme_der_pt appended
             end if
 
             do i=1,nband_ex
@@ -288,6 +297,10 @@ subroutine get_ome_sp(iflag_norder)
                                     vme_abs_der_ex_band(ibz,nj,2,i,j)=vme_abs_der(ii,jj,nj,2)
                                     vme_abs_der_ex_band(ibz,nj,3,i,j)=vme_abs_der(ii,jj,nj,3)
                                     berry_eigen_ex_band(ibz,nj,i,j)=berry_eigen(ii,jj,nj)
+                                    ! gauge-fixed (parallel-transported) complex derivative, (v^c_ij);k^a
+                                    vme_der_pt_ex_band(ibz,nj,1,i,j)=vme_der_pt(ii,jj,nj,1)
+                                    vme_der_pt_ex_band(ibz,nj,2,i,j)=vme_der_pt(ii,jj,nj,2)
+                                    vme_der_pt_ex_band(ibz,nj,3,i,j)=vme_der_pt(ii,jj,nj,3)
                               end if
                         end do
                   end do
@@ -297,6 +310,7 @@ subroutine get_ome_sp(iflag_norder)
 
       deallocate(skernel,hkernel,sderkernel,hderkernel,akernel)
       deallocate(gen_der,vme_der,vme_abs_der,gd1,gd2,gd3,hk_ev_neigh,vme_neigh,vme_der_phase)
+      deallocate(vme_der_pt)
       deallocate(M1,T1)                                          ! NEW
       !$OMP END PARALLEL
 
@@ -308,11 +322,12 @@ subroutine get_ome_sp(iflag_norder)
       end if
       if (iflag_norder.eq.2) then
          call write_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek, &
-            gen_der_ex_band,shift_vector_ex_band,berry_eigen_ex_band,vme_abs_der_ex_band)
+            gen_der_ex_band,shift_vector_ex_band,berry_eigen_ex_band,vme_abs_der_ex_band,vme_der_pt_ex_band)
       end if
       write(*,*) '   Optical matrix elements (sp) have been written in file'
 
-      deallocate(vme_ex_band,ek,berry_eigen_ex_band,gen_der_ex_band,shift_vector_ex_band,vme_abs_der_ex_band)
+      deallocate(vme_ex_band,ek,berry_eigen_ex_band,gen_der_ex_band,shift_vector_ex_band,vme_abs_der_ex_band, &
+                 vme_der_pt_ex_band)
 end subroutine get_ome_sp
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
@@ -334,7 +349,7 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der,vme_abs_der, &
       shift_vector,berry_eigen1,berry_eigen2,berry_eigen, &
       hk_ev_neigh,vme_neigh, &
       skernel,hkernel,sderkernel,hderkernel,akernel,vme_der_phase,&
-      M1,T1)
+      M1,T1,vme_der_pt)
       implicit none
 
       integer norb
@@ -367,6 +382,8 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der,vme_abs_der, &
       ! single-particle SHG generalized-derivative term (get_shg_intens_sp in sigma_second_sp.f90), which
       ! needs the full COMPLEX derivative, not just |v|'s (vme_abs_der), so the shift-vector-style
       ! modulus-only workaround does not apply here.
+      complex*16 :: vme_der_pt(norb,norb,3,3)
+      complex*16, allocatable :: vme_neigh_pt(:,:,:,:)
       complex*16, allocatable :: overlap(:), phase_corr(:)
       integer :: ineigh
 
@@ -394,6 +411,7 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der,vme_abs_der, &
       berry_eigen1=0.0d0
       berry_eigen2=0.0d0
       berry_eigen=0.0d0
+      vme_der_pt=0.0d0
       
       ! --- central point (index 7) — MOVED to the top of the routine ---
       call get_vme_kernels_ome(rkx,rky,rkz,norb,skernel,sderkernel,hkernel,hderkernel,akernel)
@@ -449,6 +467,31 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der,vme_abs_der, &
             vme_neigh(:,:,:,6)   = vme_neigh(:,:,:,7)
       end if
 
+      ! --- parallel transport: phase-align each neighbour's eigenvectors, band by band, to the central
+      ! point (index 7) before they are used in any derivative. overlap(n) = <psi_n(k0)|psi_n(kneigh)>;
+      ! dividing by its own phase removes the arbitrary, independent-diagonalization phase jump (the
+      ! source of the gauge-jump garbage in vme_der above), leaving only the smooth physical variation.
+      ! Not applied to hk_ev_neigh/vme_neigh themselves (berry_eigen/shift_vector already validated as is);
+      ! only vme_neigh_pt (used for vme_der_pt) gets it.
+      allocate(vme_neigh_pt(norb,norb,3,7))
+      allocate(overlap(norb), phase_corr(norb))
+      vme_neigh_pt(:,:,:,7) = vme_neigh(:,:,:,7)
+      do ineigh = 1, 6
+         do nn = 1, norb
+            overlap(nn) = sum(conjg(hk_ev_neigh(:,nn,7)) * hk_ev_neigh(:,nn,ineigh))
+            if (abs(overlap(nn)) > 1.0d-12) then
+               phase_corr(nn) = conjg(overlap(nn)) / abs(overlap(nn))
+            else
+               phase_corr(nn) = (1.0d0, 0.0d0)     ! near-orthogonal (degenerate/ill-conditioned): no correction possible
+            end if
+         end do
+         do nn = 1, norb
+            do nnp = 1, norb
+               vme_neigh_pt(nn,nnp,:,ineigh) = conjg(phase_corr(nn)) * phase_corr(nnp) * vme_neigh(nn,nnp,:,ineigh)
+            end do
+         end do
+      end do
+      deallocate(overlap, phase_corr)
 
       do nn=1,norb
          do nnp=1,norb
@@ -508,6 +551,9 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der,vme_abs_der, &
 
                   ! parallel-transported (gauge-fixed) raw derivative; the -i*(xi_nn-xi_mm)*v gauge-covariant
                   ! correction is added below, once berry_eigen's diagonal is available (same point as vme_der's).
+                  if (active_x) vme_der_pt(nn,nnp,1,nj) = (vme_neigh_pt(nn,nnp,nj,3)-vme_neigh_pt(nn,nnp,nj,1))/(2.0d0*dk)
+                  if (active_y) vme_der_pt(nn,nnp,2,nj) = (vme_neigh_pt(nn,nnp,nj,4)-vme_neigh_pt(nn,nnp,nj,2))/(2.0d0*dk)
+                  if (active_z) vme_der_pt(nn,nnp,3,nj) = (vme_neigh_pt(nn,nnp,nj,6)-vme_neigh_pt(nn,nnp,nj,5))/(2.0d0*dk)
 
                   call get_phase(vme_neigh(nn,nnp,nj,1),ph1)
                   call get_phase(vme_neigh(nn,nnp,nj,3),ph3)
@@ -547,11 +593,34 @@ subroutine get_berry_eigen_fourpoint(rkx,rky,rkz,norb,vme_der,vme_abs_der, &
                         -complex(0.0d0,1.0d0)*vme_neigh(nn,nnp,njp,7) &
                         *(realpart(berry_eigen(nn,nn,nj))-realpart(berry_eigen(nnp,nnp,nj)))
 
+                  ! same gauge-covariant correction (Eq. 6b), using the phase-aligned vme_neigh_pt at the
+                  ! central point (identical to vme_neigh there, PT is a no-op at dk=0).
+                  ! CORRECTED 2026-09-24: use berry_eigen2 (the Wannier-centre part <n|A|n>) ONLY, not the
+                  ! full berry_eigen = berry_eigen1 + berry_eigen2. berry_eigen1 is i<u_n|d u_n> evaluated in
+                  ! the RAW eigenvector gauge, but the derivative above is taken in the PARALLEL-TRANSPORTED
+                  ! gauge, where that part of the connection is zero by construction. Adding it back
+                  ! double-counted it and left the generalized derivative non-covariant: hBN's sp SHG kept a
+                  ! 20% C3 (D3h) violation that did NOT converge with the k-grid (20.03/20.07/20.07% at
+                  ! 30/60/120). With berry_eigen2 alone the violation collapses to ~1e-3 and does converge.
+                  vme_der_pt(nn,nnp,nj,njp)=vme_der_pt(nn,nnp,nj,njp) &
+                        -complex(0.0d0,1.0d0)*vme_neigh_pt(nn,nnp,njp,7) &
+                        *(realpart(berry_eigen2(nn,nn,nj))-realpart(berry_eigen2(nnp,nnp,nj)))
+                  ! NO magnitude clip here (removed 2026-09-23, code review finding #6): unlike
+                  ! berry_eigen/shift_vector, clip_threshold=50 is the wrong kind of guard for this
+                  ! quantity. Calibrated empirically on GeS's full 27-band window (2.5M band-pair
+                  ! samples): vme_der_pt is intrinsically heavy-tailed even for clearly non-degenerate
+                  ! pairs (gap >= 50 meV: p99=76, p99.9=2235, max=2.0e5 -- real curvature, not garbage),
+                  ! so a fixed threshold of 50 wrongly zeroed 1.19% of legitimate far-from-degenerate
+                  ! pairs while catching at most 0.04% of genuinely near-degenerate ones. vme_der_pt's
+                  ! only consumer (get_shg_intens_sp, term 2) already drops any pair with
+                  ! |E_n-E_m| < eps_deg (2.7 meV) before ever using this array -- a strictly better,
+                  ! energy-gap-based criterion for "is this pair near-degenerate" than a magnitude clip.
                end do
             end do
          end do
       end do
 
+      deallocate(vme_neigh_pt)
 
 end subroutine get_berry_eigen_fourpoint
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -641,6 +710,7 @@ end subroutine get_berry_eigen_fourpoint
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    subroutine write_ome_sp_linear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek)
       implicit none
+      integer :: iounit10
       integer iflag_norder
       integer npointstotal,nband_ex
       integer ibz
@@ -652,23 +722,24 @@ end subroutine get_berry_eigen_fourpoint
       real*8 ek
       complex*16 vme_ex_band
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-      open(10,file='ome_linear_sp_'//trim(material_name)//'.omesp')
-      write(10,*) iflag_norder
+      open(newunit=iounit10,file='ome_linear_sp_'//trim(material_name)//'.omesp')
+      write(iounit10,*) iflag_norder
       do ibz=1,npointstotal
-         write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(ek(ibz,j),j=1,nband_ex)
+         write(iounit10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz),(ek(ibz,j),j=1,nband_ex)
          do i=1,nband_ex
             do j=1,nband_ex
-               write(10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz), &
+               write(iounit10,*) rkxvector(ibz),rkyvector(ibz),rkzvector(ibz), &
                   (realpart(vme_ex_band(ibz,nj,i,j)),aimag(vme_ex_band(ibz,nj,i,j)), nj=1,3)
             end do
          end do
       end do
-      close(10)
+      close(iounit10)
    end subroutine write_ome_sp_linear
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    subroutine write_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek, &
-      gen_der_ex_band,shift_vector_ex_band,berry_eigen_ex_band,vme_abs_der_ex_band)
+      gen_der_ex_band,shift_vector_ex_band,berry_eigen_ex_band,vme_abs_der_ex_band,vme_der_pt_ex_band)
       implicit none
+      integer :: iounit10
       integer iflag_norder,npointstotal,nband_ex,ibz
 
       dimension ek(npointstotal,nband_ex)
@@ -680,25 +751,27 @@ end subroutine get_berry_eigen_fourpoint
       real*8 ek, shift_vector_ex_band
       complex*16 vme_ex_band, berry_eigen_ex_band, gen_der_ex_band
       real*8 vme_abs_der_ex_band(npointstotal,3,3,nband_ex,nband_ex)
+      complex*16 vme_der_pt_ex_band(npointstotal,3,3,nband_ex,nband_ex)
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-      open(10, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp', &
+      open(newunit=iounit10, file='ome_nonlinear_sp_'//trim(material_name)//'.omesp', &
            form='unformatted', access='stream', status='replace')
 
-      write(10) iflag_norder
-      write(10) npointstotal, nband_ex
-      write(10) rkxvector, rkyvector, rkzvector
+      write(iounit10) iflag_norder
+      write(iounit10) npointstotal, nband_ex
+      write(iounit10) rkxvector, rkyvector, rkzvector
 
       do ibz=1,npointstotal
-         write(10) ek(ibz,:)
-         write(10) vme_ex_band(ibz,:,:,:)
-         write(10) berry_eigen_ex_band(ibz,:,:,:)
-         write(10) shift_vector_ex_band(ibz,:,:,:,:)
-         write(10) gen_der_ex_band(ibz,:,:,:,:)
+         write(iounit10) ek(ibz,:)
+         write(iounit10) vme_ex_band(ibz,:,:,:)
+         write(iounit10) berry_eigen_ex_band(ibz,:,:,:)
+         write(iounit10) shift_vector_ex_band(ibz,:,:,:,:)
+         write(iounit10) gen_der_ex_band(ibz,:,:,:,:)
       end do
       ! appended AFTER the per-k records so that files written before these arrays existed stay readable
-      write(10) vme_abs_der_ex_band
+      write(iounit10) vme_abs_der_ex_band
+      write(iounit10) vme_der_pt_ex_band
 
-      close(10)
+      close(iounit10)
    end subroutine write_ome_sp_nonlinear
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    subroutine get_vme_kernels_ome(rkx,rky,rkz,norb,skernel,sderkernel, &
@@ -828,9 +901,7 @@ end subroutine get_berry_eigen_fourpoint
 ! 
 !       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !       e=0.0d0
-!       call diagoz(norb,e,hkernel)
 !       hk_ev(:,:)=hkernel(:,:)
-!       call phase_eigvec_nk(norb,hk_ev)
 !       vme=0.0d0
 !       vjseudoa=0.0d0
 !       vjseudob=0.0d0
@@ -1072,7 +1143,7 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
    end function a4_block_is_nonunitary
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    subroutine rotate_fk_ex_to_a4_basis()
-      use parser_optics_xatu_dim, only: fk_ex, norb_ex_cut
+      use parser_optics_xatu_dim, only: fk_ex, norb_ex_cut, fk_ex_basis_ok, fk_ex_loaded
       implicit none
       integer :: ibz, ic, icp, iv, ivp, n, idx, idxp
       complex*16 :: Wc(nc_ex,nc_ex), Wv(nv_ex,nv_ex)
@@ -1080,7 +1151,22 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
       real(8) :: dev
       logical :: any_rot
 
-      if (.not. a4_enabled) return
+      ! Envelopes not read yet: get_exciton_data deferred them because a second-order cache hit may
+      ! make them unnecessary. Return WITHOUT setting fk_ex_basis_ok -- if the cache then misses,
+      ! get_ome_ex loads them and calls this routine again, and only that second call may validate
+      ! them. Marking them usable here would let an unrotated fk_ex through on a cache miss, which is
+      ! exactly the O(1) error the flag exists to prevent (HANDOFF 8.46).
+      if (.not. fk_ex_loaded) return
+
+      ! Rotation switched off: the single-particle states were never rotated, so fk_ex as read from
+      ! Xatu already matches them and is fit to use.
+      if (.not. a4_enabled) then
+         fk_ex_basis_ok = .true.
+         return
+      end if
+      ! No rotation matrices: fk_ex CANNOT be carried over, so it stays marked unusable. This is only
+      ! a warning and not a stop, because a second-order OME cache hit (HANDOFF 8.44) never reads
+      ! fk_ex at all -- get_ome_ex issues the hard error at the point where it commits to the k-loop.
       if (.not. a4_W_ready) then
          write(*,*) '   WARNING (ome_sp): the Eq. (A4) rotation is active but the per-k rotation'
          write(*,*) '            matrices are unavailable (OME_sp = none reads matrix elements from'
@@ -1147,6 +1233,9 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
          end do
       end do
       deallocate(A, tmp)
+      ! Reached only with a4_W filled by get_ome_sp, so fk_ex is now in the rotated basis (or no k
+      ! point needed rotating, which is the same thing).
+      fk_ex_basis_ok = .true.
       if (any_rot) write(*,*) '   Exciton envelopes carried into the Eq. (A4) rotated basis'
    end subroutine rotate_fk_ex_to_a4_basis
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

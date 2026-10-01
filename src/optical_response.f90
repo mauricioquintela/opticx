@@ -15,45 +15,60 @@ module optical_response
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine get_optical_response()
     implicit none
-    integer :: nwp,nwq
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!   
-    !write(*,*) iflag_ome_sp
-    !write(*,*) iflag_ome_ex
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     write(*,*) '7. Entering optical_response'
-    !optical response selection
-    if (response_text  == 'none') then
-      write(*,*) '   No optical response has been evaluated'  
-    end if
-    if (response_text  == 'absorbance') then
-      write(*,*) '   Optical response: absorbance'  
-      !Evaluate sigma_first single-particle
-      call get_sigma_first_sp()
-      !Evaluate sigma_first exciton
-      if (iflag_xatu .eqv. .true.) then
-        call get_sigma_first_ex()
-      end if
-      
-    end if
-    if (response_text  == 'shift_sumrule' .or. response_text  == 'shift_shiftvector' &
-        .or. response_text  == 'shift_gender') then
-      write(*,*) '   Optical response: shift conductivity' 
-      nwp=1
-      nwq=-1
-      call get_sigma_second_sp(nwp,nwq) 
-      if (iflag_xatu .eqv. .true.) then
-        call get_sigma_second_ex(nwp,nwq) 
-      end if
-    end if
-    if (response_text /= 'none' .and. response_text /= 'absorbance' .and. &
-        response_text /= 'shift_sumrule' .and. response_text /= 'shift_shiftvector' .and. &
-        response_text /= 'shift_gender') then
-      write(*,*) 'ERROR (optical_response): unknown Response = "'//trim(response_text)//'".'
-      write(*,*) '       Valid: none, absorbance, shift_sumrule, shift_shiftvector, shift_gender.'
-      write(*,*) '       Note it is case sensitive. Nothing would have been computed; stopping.'
-      stop 1
-    end if
+    !optical response selection. The valid keyword list lives HERE, once: an unknown Response
+    !falls into `case default` and stops, so adding a branch cannot leave the validator stale
+    !(it used to be a separate five-line negated conjunction repeating all nine names).
+    select case (trim(response_text))
+
+      case ('none')
+        write(*,*) '   No optical response has been evaluated'
+
+      case ('absorbance')
+        write(*,*) '   Optical response: absorbance'
+        call get_sigma_first_sp()
+        if (iflag_xatu) call get_sigma_first_ex()
+
+      case ('shift_sumrule', 'shift_shiftvector', 'shift_gender')
+        call second_order(1, -1, 'shift conductivity')
+
+      case ('shg')
+        call second_order(1, 1, 'shg susceptibility')
+
+      case ('electrooptic')
+        call second_order(1, 0, 'electro-optic (Pockels) susceptibility, sigma(w; w, 0)')
+
+      case ('rectification')
+        ! Excitonic branch goes through METHOD A, Eq. (B1a): it has no i*hbar*omega_2 prefactor and
+        ! so stays finite at omega_2 = 0, where method B vanishes identically (HANDOFF 8.38).
+        call second_order(1, 1, 'optical rectification, sigma(0; w, -w) via Eq. (A3a)')
+
+      case ('general')
+        call second_order(1, 1, 'general second order, sigma(w_p+w_q; w_p, w_q)')
+
+      case default
+        write(*,*) 'ERROR (optical_response): unknown Response = "'//trim(response_text)//'".'
+        write(*,*) '       Valid: none, absorbance, shift_sumrule, shift_shiftvector, shift_gender,'
+        write(*,*) '              shg, electrooptic, rectification, general.'
+        write(*,*) '       Note it is case sensitive. Nothing would have been computed; stopping.'
+        stop 1
+
+    end select
     write(*,*) 'The optical response has been evaluated'
+
+  contains
+    ! Every second-order branch does the same three things and differs only in the frequency pair
+    ! and the label, so they are one routine rather than five copies.
+    subroutine second_order(nwp, nwq, label)
+      integer,          intent(in) :: nwp, nwq
+      character(len=*), intent(in) :: label
+      write(*,*) '   Optical response: '//label
+      call get_sigma_second_sp(nwp, nwq)
+      if (iflag_xatu) call get_sigma_second_ex(nwp, nwq)
+    end subroutine second_order
+
   end subroutine get_optical_response
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
- 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 end module optical_response

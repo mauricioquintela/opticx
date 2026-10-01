@@ -2,16 +2,20 @@ module parser_input_file
   implicit none
   private
   public :: material_name_in
-  public :: filename_input
   public :: xatu_eigval_filepath_in
   public :: xatu_states_filepath_in
-  public :: iflag_xatu_text
   public :: iflag_ome_sp_text
   public :: iflag_ome_ex_text
   public :: response_text
   ! Second-order two-frequency control (2026-09-24, HANDOFF 8.36).
   ! sigma^{abc}(w_p + w_q; w_p, w_q). Two ways to say what w_q is:
+  !   Frequency_ratio r      -> w_q = r * w_p, scanning w_p over Energy_variables.
+  !                             r = 1 is SHG, r = 0 electro-optic, r = -1 optical rectification.
+  !   Energy_variables_2     -> an INDEPENDENT w_q grid (e1b e2b nwb); its presence selects the full
+  !                             2D (w_p, w_q) map and overrides Frequency_ratio.
+  public :: freq_ratio, e1b, e2b, nwb, two_freq_grid
   public :: cache_ome_read, cache_ome_write
+  public :: build_freq_pairs
   public :: iflag_xatu
   public :: iflag_ome_sp
   public :: iflag_ome_ex
@@ -21,7 +25,6 @@ module parser_input_file
   public :: nband_index
   public :: norb_ex_cut
   public :: broadening_type_text
-  public :: iflag_write_exk_text
   public :: iflag_write_exk
   public :: read_line_numbers_int !subroutine
 
@@ -35,6 +38,7 @@ module parser_input_file
   character(len=1000) :: xatu_eigval_filepath_in
   character(len=1000) :: xatu_states_filepath_in
   character(len=100) :: response_text
+  real(8) :: freq_ratio = 1.0d0
   ! Opt-in cache of the second-order excitonic OMEs (HANDOFF 8.44). Both default .false.: the cache
   ! header fingerprints the exciton solution but NOT the Wannier90 model, so reuse is a choice.
   ! Read and write are INDEPENDENT -- a large run may be worth reading back but too big to store
@@ -42,6 +46,9 @@ module parser_input_file
   logical :: cache_ome_read  = .false.
   logical :: cache_ome_write = .false.
   character(len=100) :: cache_ome_ex_text = 'false'
+  real(8) :: e1b = 0.0d0, e2b = 0.0d0
+  integer :: nwb = 0
+  logical :: two_freq_grid = .false.
 
   logical :: iflag_xatu
   logical :: iflag_ome_sp
@@ -77,6 +84,7 @@ module parser_input_file
     
     subroutine get_input_file()
       implicit none
+      integer :: iounit10
       integer, allocatable :: narray(:) 
       integer :: num_values, ios
       character(len=1000) :: line
@@ -109,11 +117,11 @@ module parser_input_file
       iflag_write_exk_text = 'false'
       
       call get_command_argument(1,filename_input)
-      open(10,file=adjustl(filename_input))
+      open(newunit=iounit10,file=adjustl(filename_input))
       
       ! Read file sequentially and process parameters based on their labels
       do
-        read(10,'(A)',iostat=ios) line
+        read(iounit10,'(A)',iostat=ios) line
         if (ios /= 0) exit  ! End of file
         
         line = adjustl(line)
@@ -124,22 +132,22 @@ module parser_input_file
           param_name = adjustl(line(3:))  ! Remove "# " prefix
           
           if (index(param_name, 'Periodic dimensions') > 0) then
-            read(10,*) ndim
+            read(iounit10,*) ndim
             ndim_found = .true.
             
           else if (index(param_name, 'Wannier90_filename') > 0) then
-            read(10,'(A)') material_name_in
+            read(iounit10,'(A)') material_name_in
             material_found = .true.
             
           else if (index(param_name, 'Xatu_interface') > 0) then
-            read(10,*) iflag_xatu_text
+            read(iounit10,*) iflag_xatu_text
             xatu_found = .true.
             
             if (iflag_xatu_text == 'true') then
               iflag_xatu = .true.
               ! Read the eigval and states file paths that follow
-              read(10,'(A)') xatu_eigval_filepath_in
-              read(10,'(A)') xatu_states_filepath_in
+              read(iounit10,'(A)') xatu_eigval_filepath_in
+              read(iounit10,'(A)') xatu_states_filepath_in
             else if (iflag_xatu_text == 'false') then
               iflag_xatu = .false.
             else
@@ -148,39 +156,42 @@ module parser_input_file
             end if
             
           else if (index(param_name, 'Exciton_cutoff') > 0) then
-            read(10,*) norb_ex_cut
+            read(iounit10,*) norb_ex_cut
             exciton_found = .true.
             
           else if (index(param_name, 'Bandlist') > 0) then
-            call read_line_numbers_int(narray, num_values)
+            call read_line_numbers_int(iounit10, narray, num_values)
             bandlist_found = .true.
             
           else if (index(param_name, 'Ncells') > 0) then
-            read(10,*) npointstotal_sq
+            read(iounit10,*) npointstotal_sq
             ncells_found = .true.
             
           else if (index(param_name, 'Nfermi') > 0) then
-            read(10,*) nf
+            read(iounit10,*) nf
             nfermi_found = .true.
             
           else if (index(param_name, 'OME_sp') > 0 .or. index(param_name, 'OME_SP') > 0) then
-            read(10,*) iflag_ome_sp_text
+            read(iounit10,*) iflag_ome_sp_text
             ome_sp_found = .true.
             
           else if (index(param_name, 'OME_ex') > 0 .or. index(param_name, 'OME_EX') > 0) then
-            read(10,*) iflag_ome_ex_text
+            read(iounit10,*) iflag_ome_ex_text
             ome_ex_found = .true.
             
           else if (index(param_name, 'Response') > 0) then
-            read(10,*) response_text
+            read(iounit10,*) response_text
             response_found = .true.
             
           else if (index(param_name, 'Write_ex_kresolved') > 0) then
-            read(10,*) iflag_write_exk_text
+            read(iounit10,*) iflag_write_exk_text
             write_exk_found = .true.
             
+          else if (index(param_name, 'Energy_variables_2') > 0) then
+            read(iounit10,*) e1b, e2b, nwb
+            two_freq_grid = .true.
           else if (index(param_name, 'Cache_ome_ex') > 0) then
-            read(10,'(A)') cache_ome_ex_text
+            read(iounit10,'(A)') cache_ome_ex_text
             cache_ome_ex_text = to_lower(adjustl(cache_ome_ex_text))
             select case (trim(cache_ome_ex_text))
               case ('read')
@@ -197,11 +208,13 @@ module parser_input_file
                 write(*,*) '       Valid: read, write, readwrite (= true, both), off (= false, none).'
                 stop 1
             end select
+          else if (index(param_name, 'Frequency_ratio') > 0) then
+            read(iounit10,*) freq_ratio
           else if (index(param_name, 'Energy_variables') > 0) then
-            read(10,*) e1, e2, eta, nw
+            read(iounit10,*) e1, e2, eta, nw
             energy_found = .true.
           else if (index(param_name, 'Broadening_type') > 0 .or. index(param_name,'Broadening')>0) then
-            read(10,'(A)') broadening_type_text
+            read(iounit10,'(A)') broadening_type_text
             broadening_type_text = adjustl(broadening_type_text)
             broadening_type_text = to_lower(broadening_type_text)
           
@@ -209,7 +222,7 @@ module parser_input_file
         end if
       end do
       
-      close(10)
+      close(iounit10)
       
       ! Handle bandlist case: allocate nband_index if bandlist was found
       if (bandlist_found) then
@@ -251,10 +264,11 @@ module parser_input_file
     end subroutine get_input_file
     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     !This routine reads a line of numbers into an array
-    subroutine read_line_numbers_int(narray,num_values)
+    subroutine read_line_numbers_int(iounit,narray,num_values)
     implicit none
     allocatable :: narray(:)
 
+    integer, intent(in) :: iounit   ! the caller's open unit; was a bare 10 (audit 2026-09-30)
     integer :: ios,ncount,i
     integer :: narray
     integer :: num_values
@@ -263,7 +277,7 @@ module parser_input_file
     character(len=1000) :: line
  
     !Read the line of text
-    read(10,'(A)', iostat=ios) line
+    read(iounit,'(A)', iostat=ios) line
     if (ios /= 0) then
       print *, 'Error reading file'
     stop
@@ -302,6 +316,40 @@ module parser_input_file
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   ! Builds the list of (omega_p, omega_q) pairs for a general second-order run, in Hartree.
   ! Two modes (HANDOFF 8.36):
+  !   Energy_variables_2 present -> the full 2D grid, nfreq = nw*nwb, omega_p the SLOW index.
+  !   otherwise                  -> omega_q = freq_ratio * omega_p over the Energy_variables grid.
   ! Shared by the single-particle and excitonic drivers so the two can never drift apart.
+  subroutine build_freq_pairs(nfreq, wpg, wqg)
+    implicit none
+    integer,              intent(out) :: nfreq
+    real(8), allocatable, intent(out) :: wpg(:), wqg(:)
+    integer :: iw, iwb, idx
+    real(8) :: wrange, wrangeb, wa, wb_
+    if (two_freq_grid) then
+      nfreq = nw*nwb
+    else
+      nfreq = nw
+    end if
+    allocate(wpg(nfreq), wqg(nfreq))
+    wrange = e2 - e1
+    if (two_freq_grid) then
+      wrangeb = e2b - e1b
+      idx = 0
+      do iw = 1, nw
+        wa = (e1 + wrange/dble(nw)*dble(iw-1))/27.211385d0
+        do iwb = 1, nwb
+          wb_ = (e1b + wrangeb/dble(nwb)*dble(iwb-1))/27.211385d0
+          idx = idx + 1
+          wpg(idx) = wa
+          wqg(idx) = wb_
+        end do
+      end do
+    else
+      do iw = 1, nw
+        wpg(iw) = (e1 + wrange/dble(nw)*dble(iw-1))/27.211385d0
+        wqg(iw) = freq_ratio*wpg(iw)
+      end do
+    end if
+  end subroutine build_freq_pairs
 
 end module parser_input_file

@@ -63,21 +63,22 @@ module sigma_first_ex
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine read_ome_ex_linear(vme_ex)
     implicit none
+    integer :: iounit10
     integer nn,nkaka
     dimension vme_ex(3,norb_ex_cut)
     complex*16 vme_ex
 
     real*8 :: a1,a2,a3,a4,a5,a6
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    open(10,file='ome_linear_ex_'//trim(material_name)//'.omeex') 
-    read(10,*)     
+    open(newunit=iounit10,file='ome_linear_ex_'//trim(material_name)//'.omeex') 
+    read(iounit10,*)     
     do nn=1,norb_ex_cut
-      read(10,*) nkaka,a1,a2,a3,a4,a5,a6
+      read(iounit10,*) nkaka,a1,a2,a3,a4,a5,a6
       vme_ex(1,nn)=complex(a1,a2)
       vme_ex(2,nn)=complex(a3,a4)
       vme_ex(3,nn)=complex(a5,a6)
     end do
-    close(10)
+    close(iounit10)
   end subroutine read_ome_ex_linear
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   ! FLAG (physics, unchanged for now): vme_ex is the BARE momentum matrix element
@@ -147,6 +148,8 @@ module sigma_first_ex
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   subroutine print_sigma_first_ex(nw,wp,sigma_w_ex)
     implicit none
+    integer :: iounit55
+    integer :: iounit50
     integer :: iw
     integer :: nw
     dimension :: wp(nw)
@@ -155,16 +158,15 @@ module sigma_first_ex
     real*8 :: wp,feps
     complex*16 :: sigma_w_ex
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
-    !write frequency dependent conductivity	  
-    open(50,file='sigma_first_ex_real_'//trim(material_name)//'.dat')
-    open(55,file='sigma_first_ex_imag_'//trim(material_name)//'.dat')
+    open(newunit=iounit50,file='sigma_first_ex_real_'//trim(material_name)//'.dat')
+    open(newunit=iounit55,file='sigma_first_ex_imag_'//trim(material_name)//'.dat')
     
     feps=1.0d0 !use atomic units
     ! serial on purpose (audit 2026-09-24): this loop is pure file I/O and every iteration was
     ! inside !$omp ordered, which serialises it completely -- the parallel wrapper only added
     ! thread spawn and synchronisation cost. HANDOFF 8.35.
     do iw=1,nw
-      write(50,*) wp(iw)*27.211385d0, &
+      write(iounit50,*) wp(iw)*27.211385d0, &
         realpart(feps*sigma_w_ex(1,1,iw)), &
         realpart(feps*sigma_w_ex(1,2,iw)), &
         realpart(feps*sigma_w_ex(1,3,iw)), &
@@ -175,7 +177,7 @@ module sigma_first_ex
         realpart(feps*sigma_w_ex(3,2,iw)), &
         realpart(feps*sigma_w_ex(3,3,iw))
   
-      write(55,*) wp(iw)*27.211385d0, &
+      write(iounit55,*) wp(iw)*27.211385d0, &
           aimag(feps*sigma_w_ex(1,1,iw)), &
           aimag(feps*sigma_w_ex(1,2,iw)), &
           aimag(feps*sigma_w_ex(1,3,iw)), &
@@ -187,8 +189,8 @@ module sigma_first_ex
           aimag(feps*sigma_w_ex(3,3,iw))	
     end do
 
-    close(50)
-    close(55)
+    close(iounit50)
+    close(iounit55)
 
   end subroutine print_sigma_first_ex
 
