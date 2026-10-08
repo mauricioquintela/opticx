@@ -4,10 +4,12 @@ module parser_optics_xatu_dim
     only:material_name,R,nRvec,norb !variables
   use parser_input_file, &
     only:xatu_eigval_filepath_in,xatu_states_filepath_in, & !filepaths
+      iflag_xatu_h5,xatu_h5_filepath_in, & !Xatu HDF5 archive
       ndim,npointstotal_sq, & !variables
       iflag_xatu,nf,nband_index,norb_ex_cut, & 
       cache_ome_read,iflag_ome_ex_text,iflag_write_exk,second_order_response, & !for the fk_ex deferral, below
       read_line_numbers_int !subroutine
+  use xatu_h5, only: xatu_h5_info,xatu_h5_header,xatu_h5_energies,xatu_h5_kpoints,xatu_h5_states
   implicit none
 
   integer :: nv_ex,nc_ex
@@ -242,6 +244,11 @@ subroutine get_exciton_dim()
   character(len=:), allocatable :: file2open
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!		  
 
+  if (iflag_xatu_h5) then
+    call get_exciton_dim_h5()
+    return
+  end if
+
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   !This part gets 'nband_ex' and 'nband_index(nband_ex)'
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -377,6 +384,86 @@ subroutine get_exciton_dim()
   end if
 
 end subroutine get_exciton_dim
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! get_exciton_dim for a Xatu HDF5 archive. The archive states the band window, the mesh and the
+! exciton count explicitly, so nothing is inferred from the layout of the basis list. It also states
+! the Xatu Fermi level and mesh, which the text files do not, so a wrong Nfermi or a mesh opticx cannot
+! use (Xatu submesh) stops here instead of producing a wrong answer.
+subroutine get_exciton_dim_h5()
+  implicit none
+  type(xatu_h5_info) :: info
+  integer, allocatable :: offsets(:)
+  integer :: i
+
+  write(*,*) '   Reading Xatu archive ', trim(xatu_h5_filepath_in)
+  call xatu_h5_header(trim(xatu_h5_filepath_in), info)
+
+  ! Xatu numbers bands from 0 with its Fermi level at band 'fermi_level'; opticx counts from 1 with
+  ! Nfermi filled bands. The valence/conduction split below uses Nfermi, so the two must agree.
+  if (info%fermi_level + 1 /= nf) then
+    write(*,'(a,i0,a,i0,a)') ' ERROR (get_exciton_dim): Nfermi = ', nf, ' but the Xatu run that wrote the archive had ', &
+         info%fermi_level + 1, ' filled bands.'
+    write(*,*) '       Set Nfermi to match the Xatu filling, or rerun Xatu with the intended one.'
+    stop 1
+  end if
+  ! opticx differentiates the envelopes between mesh neighbours, so it needs Xatu's full mesh.
+  if (info%submesh /= 1 .or. info%nk /= info%ncells**ndim) then
+    write(*,'(a,i0,a,i0,a,i0,a,i0)') ' ERROR (get_exciton_dim): the archive holds ', info%nk, &
+         ' k points (ncells = ', info%ncells, ', submesh = ', info%submesh, ', ndim = ', ndim
+    write(*,*) '       opticx needs the full ncells^ndim Monkhorst-Pack mesh. Rerun Xatu without submesh.'
+    stop 1
+  end if
+  if (.not. info%tda) then
+    write(*,*) '   WARNING (get_exciton_dim): Xatu solved the full BSE (no Tamm-Dancoff); opticx uses the'
+    write(*,*) '            resonant block of each state only, as with the text files.'
+  end if
+
+  ! Band offsets from the Fermi level, as the text path builds them (0 = top valence, 1 = bottom conduction).
+  allocate(offsets(info%nv + info%nc))
+  do i = 1, info%nv
+    offsets(i) = info%vbands(i) + 1 - nf
+  end do
+  do i = 1, info%nc
+    offsets(info%nv + i) = info%cbands(i) + 1 - nf
+  end do
+  if (allocated(nband_index)) then
+    if (size(nband_index) /= size(offsets)) then
+      write(*,*) 'ERROR (get_exciton_dim): Bandlist disagrees with the band window of the Xatu archive.'
+      write(*,'(a,30i4)') '        Bandlist: ', nband_index
+      write(*,'(a,30i4)') '        archive:  ', offsets
+      write(*,*) '       Remove Bandlist (the archive sets the window) or make it match.'
+      stop 1
+    else if (any(nband_index /= offsets)) then
+      write(*,*) 'ERROR (get_exciton_dim): Bandlist disagrees with the band window of the Xatu archive.'
+      write(*,'(a,30i4)') '        Bandlist: ', nband_index
+      write(*,'(a,30i4)') '        archive:  ', offsets
+      write(*,*) '       Remove Bandlist (the archive sets the window) or make it match.'
+      stop 1
+    end if
+    deallocate(nband_index)
+  end if
+  allocate(nband_index(size(offsets)))
+  nband_index = offsets
+
+  npointstotal = info%nk
+  npointstotal_sq = info%ncells
+  norb_ex_band = info%nv*info%nc
+  norb_ex = info%dim
+
+  if (norb_ex_cut <= 0) then
+    norb_ex_cut = info%nexc
+    write(*,'(a,i0,a)') '    Exciton_cutoff not given: using all ', norb_ex_cut, ' excitons in the Xatu archive'
+  else if (norb_ex_cut > info%nexc) then
+    write(*,'(a,i0,a,i0,a)') ' ERROR (get_exciton_dim): Exciton_cutoff = ', norb_ex_cut, ' but the Xatu archive holds ', &
+         info%nexc, ' excitons.'
+    write(*,'(a,i0,a)') '        Lower Exciton_cutoff to at most ', info%nexc, ', or rerun Xatu with a larger -n.'
+    stop 1
+  end if
+  write(*,'(a,i0,a,i0,a,i0,a,i0,a)') '    Xatu archive: ', info%nexc, ' excitons, ', info%nk, ' k points, ', &
+       info%nv, ' valence x ', info%nc, ' conduction bands'
+
+end subroutine get_exciton_dim_h5
 	  
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 subroutine get_reciprocal_vectors()
@@ -482,6 +569,9 @@ subroutine get_exciton_data()
   integer :: header1, ios
   integer :: iounit_eex, iounit_kgrid
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!		  
+  if (iflag_xatu_h5) then
+    call get_exciton_data_h5()
+  else
   !get energies
   file2open=trim(xatu_eigval_filepath_in)
   open(newunit=iounit_eex,file=file2open) 
@@ -529,12 +619,15 @@ subroutine get_exciton_data()
       end do
     end do
   close(iounit_kgrid)
+  end if
 
   !Please I like to work in atomic units!  	
   e_ex=e_ex/27.211385d0
   rkxvector=rkxvector*0.52917721067121d0 
   rkyvector=rkyvector*0.52917721067121d0 
   rkzvector=rkzvector*0.52917721067121d0 
+
+  if (iflag_xatu_h5) call check_h5_mesh()
 
   ! The envelopes themselves are read here only if something is going to use them. A second-order OME
   ! cache read may make them unnecessary; in that case load_fk_ex() is called later, by get_ome_ex, if
@@ -551,6 +644,43 @@ subroutine get_exciton_data()
 end subroutine get_exciton_data
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Energies (eV) and k mesh (Angstrom^-1) from a Xatu HDF5 archive, in the units the text path reads them.
+subroutine get_exciton_data_h5()
+  implicit none
+  real(8), allocatable :: k(:,:)
+
+  call xatu_h5_energies(trim(xatu_h5_filepath_in), norb_ex_cut, e_ex)
+  allocate(k(3, npointstotal))
+  call xatu_h5_kpoints(trim(xatu_h5_filepath_in), npointstotal, k)
+  rkxvector = k(1,:)
+  rkyvector = k(2,:)
+  rkzvector = k(3,:)
+end subroutine get_exciton_data_h5
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! The archive's mesh must be the one opticx builds itself (get_grid, the same Monkhorst-Pack mesh in the
+! same order): the envelope derivatives pair each k point with its mesh neighbours by index. A shifted
+! Xatu mesh, or a Xatu run on a different lattice, stops here. The archive's k points are kept.
+subroutine check_h5_mesh()
+  implicit none
+  real(8), allocatable :: kx(:), ky(:), kz(:)
+  real(8) :: dk, gmax
+
+  kx = rkxvector; ky = rkyvector; kz = rkzvector
+  call get_grid()
+  dk = maxval(sqrt((rkxvector-kx)**2 + (rkyvector-ky)**2 + (rkzvector-kz)**2))
+  gmax = maxval(abs(G))
+  rkxvector = kx; rkyvector = ky; rkzvector = kz
+  if (dk > 1.0d-5*gmax) then
+    write(*,'(a,es10.3,a)') ' ERROR (get_exciton_data): the Xatu k mesh differs from the opticx mesh by up to ', dk, &
+         ' bohr^-1.'
+    write(*,*) '       opticx needs Xatu''s unshifted Monkhorst-Pack mesh on the lattice of the Wannier90 file.'
+    stop 1
+  end if
+  write(*,'(a,es9.2,a)') '    Xatu k mesh = opticx mesh (max |dk| ', dk, ' bohr^-1)'
+end subroutine check_h5_mesh
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! Read the exciton envelopes fk_ex from the .states file. Split out of get_exciton_data so that it can
 ! be skipped when a second-order OME cache hit will supply the excitonic matrix elements directly, and
 ! run on demand if that cache misses. Re-opens the file and skips the k-mesh block (norb_ex lines),
@@ -565,6 +695,13 @@ subroutine load_fk_ex()
 
   if (fk_ex_loaded) return
   nkaka = 0
+
+  if (iflag_xatu_h5) then
+    write(*,*) '   Reading exciton wavefunctions from the Xatu archive...'
+    call xatu_h5_states(trim(xatu_h5_filepath_in), norb_ex, norb_ex_cut, fk_ex)
+    fk_ex_loaded = .true.
+    return
+  end if
 
   file2open=trim(xatu_states_filepath_in)
   open(newunit=iounit10,file=file2open)

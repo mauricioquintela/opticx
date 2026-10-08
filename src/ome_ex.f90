@@ -1490,7 +1490,8 @@ contains
       write(*,*) '   ERROR (read_ome_ex_second): cached exciton energies differ from the current ones'
       write(*,'(A,ES12.4)') '          max|dE| = ', &
            maxval(abs(e_in(1:norb_ex_cut) - e_ex(1:norb_ex_cut)))
-      write(*,*) '          The .eigval/.states files have changed. Delete '//trim(fname)//'.'
+      write(*,*) '          The Xatu files have changed (an archive and the text files of the same run also'
+      write(*,*) '          differ here: the archive keeps full precision). Delete '//trim(fname)//'.'
       deallocate(e_in); close(u); stop 1
     end if
     deallocate(e_in)

@@ -19,6 +19,7 @@ module parser_input_file
   public :: sp_covariant
   public :: build_freq_pairs
   public :: iflag_xatu
+  public :: iflag_xatu_h5, xatu_h5_filepath_in
   public :: iflag_ome_sp
   public :: iflag_ome_ex
   public :: ndim,nf,npointstotal_sq
@@ -43,6 +44,8 @@ module parser_input_file
   character(len=100) :: iflag_write_exk_text
   character(len=1000) :: xatu_eigval_filepath_in
   character(len=1000) :: xatu_states_filepath_in
+  ! Xatu exciton archive (xatu -H): one '<label>.h5' path in place of the .eigval/.states pair
+  character(len=1000) :: xatu_h5_filepath_in = ''
   character(len=100) :: response_text
   character(len=100) :: iflag_orthonormal_text
   ! Band-structure path (Kpath): vertices in reduced coordinates along the reciprocal lattice vectors and,
@@ -92,6 +95,7 @@ module parser_input_file
   logical :: two_freq_grid = .false.
 
   logical :: iflag_xatu
+  logical :: iflag_xatu_h5 = .false.
   logical :: iflag_ome_sp
   logical :: iflag_ome_ex
   logical :: iflag_orthonormal = .true.   ! default for any caller that does not parse an input file
@@ -109,6 +113,21 @@ module parser_input_file
 
   contains
   !> True for the Response values evaluated by the second-order routines (optical_response::second_order).
+  ! A Xatu exciton archive is recognised by its extension, .h5 or .hdf5 (any case).
+  logical function is_h5_path(path)
+    character(len=*), intent(in) :: path
+    character(len=len(path)) :: low
+    integer :: i, n
+    low = path
+    do i = 1, len(low)
+      if (low(i:i) >= 'A' .and. low(i:i) <= 'Z') low(i:i) = achar(iachar(low(i:i)) + 32)
+    end do
+    n = len_trim(low)
+    is_h5_path = .false.
+    if (n >= 3) is_h5_path = low(n-2:n) == '.h5'
+    if (n >= 5) is_h5_path = is_h5_path .or. low(n-4:n) == '.hdf5'
+  end function is_h5_path
+
   logical function second_order_response()
     select case (trim(response_text))
       case ('shift_sumrule', 'shift_shiftvector', 'shift_gender', 'shift_covariant', 'shg', 'shg_covariant', &
@@ -200,9 +219,17 @@ module parser_input_file
             
             if (iflag_xatu_text == 'true') then
               iflag_xatu = .true.
-              ! Read the eigval and states file paths that follow
+              ! Read the file paths that follow: either one Xatu HDF5 archive (.h5/.hdf5, written by
+              ! 'xatu -H') or the .eigval and .states text files, in that order.
               read(iounit10,'(A)') xatu_eigval_filepath_in
-              read(iounit10,'(A)') xatu_states_filepath_in
+              xatu_eigval_filepath_in = adjustl(xatu_eigval_filepath_in)
+              if (is_h5_path(xatu_eigval_filepath_in)) then
+                iflag_xatu_h5 = .true.
+                xatu_h5_filepath_in = xatu_eigval_filepath_in
+                xatu_eigval_filepath_in = ''
+              else
+                read(iounit10,'(A)') xatu_states_filepath_in
+              end if
             else if (iflag_xatu_text == 'false') then
               iflag_xatu = .false.
             else

@@ -947,6 +947,11 @@ end subroutine get_berry_eigen_fourpoint
       logical :: act(3)
 
       allocate(ev(norb,norb,7), vv(norb,norb,3,7), rr(norb,norb,3,7), ee(norb,7))
+      ! The neighbours of an inactive direction are skipped below, but ee is returned whole (ee_out) and the
+      ! covariant kernel divides by these energies for every point (with rr = 0 there). Left unset they were
+      ! whatever the allocation held: written into the .omesp, they made it differ between identical runs, and a
+      ! NaN bit pattern would have reached every component along that direction.
+      ee = 0.0d0
       allocate(a_c(norb,norb,3), xi(norb,norb,3), O(norb,norb), T(norb,norb), rt(norb,norb,3,2), tmp(norb,norb))
       allocate(s_c(norb,norb))
       act = (/ active_x, active_y, active_z /)

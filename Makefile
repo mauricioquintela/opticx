@@ -31,6 +31,17 @@ LIBS   = -lopenblas -fopenmp -lgfortran
 endif
 
 # -----------------------------------------------------------------
+# Optional: read Xatu HDF5 exciton archives (xatu -H)
+# Usage: make HDF5=1  (after 'make clean' when switching; needs the
+# HDF5 Fortran library, e.g. libhdf5-dev / hdf5-fortran)
+# -----------------------------------------------------------------
+HDF5_INC ?= /usr/include
+ifeq ($(HDF5),1)
+H5FLAGS = -DOPTICX_HDF5 -I$(HDF5_INC)
+LIBS   += -lhdf5_fortran -lhdf5
+endif
+
+# -----------------------------------------------------------------
 # Directories
 # -----------------------------------------------------------------
 MAINDIR  = main
@@ -90,10 +101,14 @@ $(BINDIR)/opticx.o: $(SRC_MAIN) | $(BINDIR) $(BUILDDIR)
 $(BUILDDIR)/parser_wannier90_tb.o: \
 	$(BUILDDIR)/parser_input_file.o 
 
+# xatu_h5.f90 holds the HDF5 reader behind #ifdef OPTICX_HDF5
+$(BUILDDIR)/xatu_h5.o: FFLAGS += -cpp $(H5FLAGS)
+
 $(BUILDDIR)/parser_optics_xatu_dim.o: \
 	$(BUILDDIR)/constants_math.o \
 	$(BUILDDIR)/parser_wannier90_tb.o \
-	$(BUILDDIR)/parser_input_file.o 
+	$(BUILDDIR)/parser_input_file.o \
+	$(BUILDDIR)/xatu_h5.o
 
 $(BUILDDIR)/exciton_envelopes.o: \
     $(BUILDDIR)/constants_math.o \
@@ -268,6 +283,11 @@ check_bands: $(TARGET)
 # Band window: report and warning for an unusual Bandlist (a list of offsets, not a range)
 check_bandlist_guard: $(TARGET)
 	python3 tools/check_bandlist_guard.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_bandlist_guard
+
+# Xatu HDF5 archive input (needs a 'make HDF5=1' build and h5py): archive = text files, guards.
+# XATU=path/to/xatu (built with HDF5=1) adds a real Xatu run written both ways.
+check_xatu_h5: $(TARGET)
+	python3 tools/check_xatu_h5.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_xatu_h5 $(if $(XATU),--xatu $(XATU))
 
 # _tb.dat reader: Hermiticity check and repair of H, S and r
 check_tb_hermiticity: $(TARGET)
