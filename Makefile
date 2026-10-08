@@ -11,7 +11,7 @@
 # Compiler and flags
 # -----------------------------------------------------------------
 FC     = gfortran
-FFLAGS = -fopt-info-vec -g -fcheck=all -O3
+FFLAGS = -fopt-info-vec -g -fcheck=all -O3 -ffree-line-length-none
 #FFLAGS = -O2-Wall  -g -fcheck=all 
 
 # -----------------------------------------------------------------
