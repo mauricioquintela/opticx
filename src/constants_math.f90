@@ -5,7 +5,14 @@ module constants_math
   ! Second-order conductivity, atomic units -> uA nm / V^2. Was written out by hand at five
   ! sites in sigma_second_sp/ex; one of them had lost the d0 on the Hartree value and so ran
   ! 2.0e-8 relative high (audit 2026-09-30).
-  real(8), parameter :: sigma2_au_to_si = &
+  ! Electron charge convention: e = -|e| (2026-10-04). Every second-order
+  ! conductivity is proportional to e^3 (npj Comput. Mater. 11, 13, Eqs. 9-11; Taghizadeh et al.
+  ! PRB 96, 195413, Eq. A3a) and all second-order kernels are written with e = 1, so the sign of
+  ! e enters here, once, for all six second-order output files (shift, SHG, general; sp and ex).
+  ! With e = -|e| opticx reproduces the published MoS2 and GeS shift spectra of the npj paper,
+  ! which were computed with this convention. First-order responses carry e^2 and are unaffected.
+  real(8), parameter :: e_charge_au = -1.0d0
+  real(8), parameter :: sigma2_au_to_si = e_charge_au**3 * &
        (6.623618d-03)*(1.0d+06)*(27.211386d0**(-2))*(5.291772d-11)*(1.0d+09)
   
   contains
@@ -74,5 +81,42 @@ subroutine diagoz(n,w,h)
   deallocate(WORK)
 end subroutine diagoz
   
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!   NAME:         diagoz_gen
+!   INPUTS:       h: matrix to diagonalize
+!                 s: overlap matrix 
+!                 n: dimension of h and s
+!   OUTPUTS:      w; eigenvalues of h
+!                 h;  gives eigenvectors by columns as output
+!   DESCRIPTION:  this subroutine solves the generalized eigenvalue problem H*v = e*S*v using 
+!                 LAPACK zhegv
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
+  subroutine diagoz_gen(n,w,h,s)
+    implicit none 
+    integer n,INFO,LWORK,ITYPE
+    dimension w(n)
+    dimension RWORK(3*n-2)
+    dimension h(n,n)
+    dimension s(n,n)
+
+    real(8) w
+    real(8) RWORK
+    complex*16 h,s
+    complex*16 WORK(2*n)
+    character*1 JOBZ,UPLO
+
+    ITYPE=1
+    JOBZ='V'
+    UPLO='U'
+    LWORK=2*n
+
+    call zhegv(ITYPE,JOBZ,UPLO,n,h,n,s,n,w,WORK,LWORK,RWORK,INFO)
+    if (INFO /= 0) then
+      write(*,*) 'ERROR: Generalized eigenvalue problem failed. zhegv failed with INFO =', INFO
+      write(*,*) '       (INFO > n means the overlap matrix S(k) is not positive definite.)'
+      stop 1
+    end if
+  end
 end module constants_math
 

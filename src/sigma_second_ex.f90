@@ -29,20 +29,20 @@ module sigma_second_ex
     end if
 
     !compute shg susceptibility (omega_p = omega_q)
-    if (nwp.eq.1 .and. nwq.eq.1 .and. response_text == 'shg') then
+    if (nwp.eq.1 .and. nwq.eq.1 .and. (response_text == 'shg' .or. response_text == 'shg_covariant')) then
       call get_sigma_shg_ex()
     end if
 
-    ! General second order at arbitrary (omega_p, omega_q). HANDOFF 8.37. get_sigma_general_ex picks
-    ! the observable from the frequency pair: Eq. (B1b) (position, method B) everywhere except on the
-    ! DC line omega_q = -omega_p, where Eq. (B1b) has no content (its terms 1-2 carry omega_2 = 0) and
-    ! the routine switches to Eq. (B1a) (method A) under the DC convention of HANDOFF 8.42.
+    ! General second order at arbitrary (omega_p, omega_q), causal broadening everywhere. get_sigma_general_ex
+    ! uses Eq. (B1b) (position, method B), except where omega_1 + omega_2 = 0 is in range (rectification and 2D
+    ! maps containing that line): there Eq. (B1a) (method A) with term 3 on the bare exciton current, which
+    ! resolves the injection current on the mesh.
     if (response_text == 'electrooptic') then
       freq_ratio = 0.0d0; two_freq_grid = .false.
       call get_sigma_general_ex('electrooptic')
     else if (response_text == 'rectification') then
       freq_ratio = -1.0d0; two_freq_grid = .false.
-      call get_sigma_general_ex('rectification')   ! the DC branch: Eq. (B1a), omega_2 = 0 exactly
+      call get_sigma_general_ex('rectification')   ! whole causal sigma(0; w, -w), method A (shift current: Response = shift)
     else if (response_text == 'general') then
       call get_sigma_general_ex('general')
     end if
@@ -137,6 +137,10 @@ module sigma_second_ex
       end do
     end do
     deallocate(sigma_raw)
+    ! PHYSICAL SIGN: Eq. (B1b) as written by Taghizadeh & Pedersen already contains the electron charge,
+    ! while sigma2_au_to_si applies e^3 = -1 on top; a real-time propagation of hBN (non-interacting limit) shows every
+    ! causal-prescription second-order output came out with the opposite sign. Magnitudes (2018 convention) were right.
+    sigma_shg = -sigma_shg
     call print_shg_second_ex(nw,wp,sigma_shg)
     write(*,*) '    SHG susceptibility (ex) has been printed'
   end subroutine get_sigma_shg_ex
@@ -601,7 +605,7 @@ subroutine get_shg_kernel_ex_static(nj, njp, njpp, nn, nnp, s1, s2, s3)
 
   s1 =  vme_ex(nj,nn)        * xme_ex_inter(njp,nn,nnp)        * conjg(xme_ex(njpp,nnp))
   s2 =  conjg(vme_ex(nj,nn)) * conjg(xme_ex_inter(njp,nn,nnp)) * xme_ex(njpp,nnp)
-  s3 = -xme_ex(njp,nn)       * vme_ex_inter(nj,nn,nnp)         * conjg(xme_ex(njpp,nnp))
+  s3 = -xme_ex(njpp,nn)      * vme_ex_inter(nj,nn,nnp)         * conjg(xme_ex(njp,nnp))   ! Eq. (A9b) pairing
 
 end subroutine get_shg_kernel_ex_static
 
@@ -664,7 +668,7 @@ subroutine get_shg_kernel_ex_static_methodB(nj, njp, njpp, nn, nnp, s1, s2, s3)
 
   s1 = xme_ex(nj,nn)        * xme_ex_inter(njp,nn,nnp)        * conjg(xme_ex(njpp,nnp))
   s2 = conjg(xme_ex(nj,nn)) * conjg(xme_ex_inter(njp,nn,nnp)) * xme_ex(njpp,nnp)
-  s3 = xme_ex(njp,nn)       * xme_ex_inter(nj,nn,nnp)         * conjg(xme_ex(njpp,nnp))
+  s3 = xme_ex(njpp,nn)      * xme_ex_inter(nj,nn,nnp)         * conjg(xme_ex(njp,nnp))   ! Eq. (A9b) pairing
 
 end subroutine get_shg_kernel_ex_static_methodB
 
@@ -780,7 +784,8 @@ subroutine get_shg_intens_ex_matrix(wp, eta2, sigma_shg)
             Amat(nn,1:nw_this) = -xme_ex(njp,nn) / (omega_c(1:nw_this) + e_ex(nn))
           end do
           term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
-          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+          ! Eq. (A9b) field pairing, as in get_second_intens_ex_methodA: stored at (a, b = njpp, c = njp)
+          sigma_shg(nj,njpp,njp,iw0:iw1) = sigma_shg(nj,njpp,njp,iw0:iw1) &
               - term_total(1:nw_this) / (dble(npointstotal)*vcell)
         end do
       end do
@@ -804,23 +809,24 @@ end subroutine get_shg_intens_ex_matrix
 !                                                - X_n^b X_nm^a X_m^c* /((w+E_n)(w-E_m)) ]
 ! with w = omega+i*eta and omega_2 = w + w = 2*omega + 2i*eta (paper convention).
 ! Same conventions as get_shg_kernel_ex_*_methodB, which this routine must reproduce.
-! GENERALISED 2026-09-24 to arbitrary (omega_p, omega_q); see HANDOFF 8.37.
+! GENERALISED 2026-09-24 to arbitrary (omega_p, omega_q); see.
 ! Taghizadeh & Pedersen PRB 97, 205432 (2018) Eq. (B1b), method B (position elements only):
 !
 !   sigma^B(2) = +C_ee (i hbar w2) sum_nm [  X_n X_nm X*_m / ((hw2 - E_n)(hw_q - E_m))
 !                                          + X*_n X*_nm X_m / ((hw2 + E_n)(hw_q + E_m))
 !                                          - X_n X_nm X*_m / ((hw_q + E_n)(hw_p - E_m)) ]
 !
-! Unlike the single-particle Eq. (A3a) -- where omega_q only ever entered through the sum (HANDOFF 8.36)
+! Unlike the single-particle Eq. (A3a) -- where omega_q only ever entered through the sum
 ! -- here omega_p appears ON ITS OWN, in the third term. So this kernel needs THREE complex frequencies:
 ! hwp, hwq and hw2 = hwp + hwq. Note also that the third term of Eq. (A9b) is U_n O_nm U*_m, i.e. the
 ! OBSERVABLE sits on the inter-exciton element there while in terms 1 and 2 it sits on the n element;
 ! the existing index assignment (Mmat = xme_ex_inter(nj) in term 3 but (njp) in terms 1-2) is therefore
 ! correct and is NOT a copy-paste slip.
 !
-! IMPORTANT: the prefactor is i*hbar*w2, so at w2 = 0 this expression vanishes IDENTICALLY. Method B
-! cannot produce optical rectification / the shift current; that is what get_shift_intens_ex is for
-! (it builds Pi from X and uses the DC convention of CLAUDE.md). The general driver guards against it.
+! IMPORTANT: the prefactor is i*hbar*w2, so at w2 = 0 this expression vanishes IDENTICALLY, and on the causal
+! DC line (w2 = 2i eta) it resolves the injection current only with the k-mesh. The general driver uses
+! method A there. The shift current in the convention of npj Comput. Mater. 11, 13 (2025) (omega_q = -omega_p,
+! omega_2 = 0, Eqs. 10-11) is get_shift_intens_ex.
 subroutine get_second_intens_ex_methodB(nfreq, hwp, hwq, hw2, sigma_shg)
   implicit none
   integer,    intent(in)    :: nfreq
@@ -911,7 +917,11 @@ subroutine get_second_intens_ex_methodB(nfreq, hwp, hwq, hw2, sigma_shg)
             Amat(nn,1:nw_this) = xme_ex(njp,nn) / (omega_c(1:nw_this) + e_ex(nn))
           end do
           term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
-          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+          ! FIELD PAIRING (Eq. A9b): in term 3, U_n carries the w_q field and U*_m the w_p field, so the X_n
+          ! factor (with hw_q + E_n) is the c index and the X*_m factor (with hw_p - E_m) the b index. Stored at
+          ! (a, b = njpp, c = njp). Only the b<->c antisymmetric part depends on this: with the indices the other way
+          ! round the injection current (circular light, buckled hBN) had the opposite sign to a real-time propagation.
+          sigma_shg(nj,njpp,njp,iw0:iw1) = sigma_shg(nj,njpp,njp,iw0:iw1) &
               - pref(1:nw_this)*term_total(1:nw_this)
         end do
       end do
@@ -930,14 +940,14 @@ end subroutine get_second_intens_ex_methodB
 !                              + Pi*_n X*_nm X_m / ((hw2 + E_n)(hw_q + E_m))
 !                              - X_n Pi_nm X*_m / ((hw_q + E_n)(hw_p - E_m)) ]
 !
-! WHY THIS EXISTS (HANDOFF 8.38): unlike Eq. (B1b), method A has NO i*hbar*omega_2 prefactor, so it does
-! NOT vanish at omega_2 = 0. It is therefore the route to the EXCITONIC OPTICAL RECTIFICATION / shift
-! current, which method B structurally cannot give.
+! WHY THIS EXISTS: unlike Eq. (B1b), method A has NO i*hbar*omega_2 prefactor, so it does
+! NOT vanish at omega_2 = 0. With term 3 on the bare current (bare_term3) it is the route to the EXCITONIC
+! OPTICAL RECTIFICATION on the causal DC line, injection current included.
 !
 ! Pi is built from X INSIDE this routine, Pi_n = -i E_n X_n and Pi_nm = i(E_n - E_m) X_nm (paper Eq. 4a/4b;
-! CLAUDE.md "anything that needs Pi must build it from X"). It deliberately does NOT read vme_ex/
-! vme_ex_inter: those hold the BARE momentum P, not Pi, and feeding them to a method-A expression is the
-! documented trap that makes the result wrong by ~34% on hBN. Building Pi here makes that misuse impossible.
+! Taghizadeh & Pedersen 2018, Eq. 10: with an e-h interaction Pi_n = P_n - i F_n /= P_n). It deliberately does
+! NOT read vme_ex: the ground-to-exciton BARE momentum P_n differs from Pi_n by ~34% on hBN, and terms 1-2 need
+! Pi. Term 3 reads the bare exciton-exciton current vme_ex_inter only when bare_term3 is set (see below).
 !
 ! Index roles follow Eq. (A9b) exactly, as in method B: in terms 1 and 2 the observable sits on the n
 ! element (Amat carries a, Mmat carries b); in term 3 it sits on the INTER-exciton element (Mmat carries a,
@@ -945,17 +955,27 @@ end subroutine get_second_intens_ex_methodB
 !> Excitonic second-order conductivity by method A, Eq. (B1a) of Taghizadeh & Pedersen,
 !! PRB 97, 205432 (2018): the Heisenberg-momentum (Pi) observable. Pi is built internally
 !! from X, never read from vme_ex, which holds the bare momentum P.
-!! Used where method B cannot be: Eq. (B1b) carries an overall i*hbar*omega_2 and is
-!! identically zero at omega_2 = 0.
+!! Used where omega_1 + omega_2 = 0 is in range: Eq. (B1b) carries an overall i*hbar*omega_2 (= -2 eta there,
+!! causal broadening), and its term 3 resolves the injection current only with the k-mesh.
 !! @param nfreq             Number of (omega_p, omega_q) pairs.
 !! @param hwp, hwq, hw2     Complex hbar*omega_p, hbar*omega_q and their sum.
 !! @param sigma_shg         Result, not yet symmetrised over the field indices.
+!! @param bare_term3        Optional, default .false.: term 3 (the exciton-exciton populations and coherences,
+!!                          Eq. A9b term 3) reads the BARE current P_nm (vme_ex_inter) instead of
+!!                          Pi_nm = i(E_n - E_m) X_nm. Pi has no diagonal and vanishes for degenerate pairs, so
+!!                          with it the injection current converges only with the k-mesh (buckled hBN 75x75,
+!!                          eta = 0.025 eV: 10% of its converged weight), and in the non-interacting limit it
+!!                          leaves a mesh artifact in the shift part (0.90 of the exact value at 75x75,
+!!                          eta = 0.1 eV). With P the non-interacting limit equals the single-particle
+!!                          rectification (least squares 1.000) and the result is mesh-converged at 75x75.
 !! @return void
-subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg)
+subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg, bare_term3)
   implicit none
   integer,    intent(in)    :: nfreq
   complex(8), intent(in)    :: hwp(nfreq), hwq(nfreq), hw2(nfreq)
   complex(8), intent(inout) :: sigma_shg(3,3,3,nfreq)
+  logical,    intent(in), optional :: bare_term3
+  logical :: use_bare
 
   integer, parameter :: nw_chunk = 2000
   integer :: nj, njp, njpp, nn, nnp
@@ -967,6 +987,8 @@ subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg)
 
   sigma_shg = (0.0d0, 0.0d0)
   prefA = -1.0d0/(dble(npointstotal)*vcell)      ! -C_ee, C_ee = 1 in these units (as in method B)
+  use_bare = .false.
+  if (present(bare_term3)) use_bare = bare_term3
 
   allocate(omega_c(nw_chunk), omega2_c(nw_chunk), omegap_c(nw_chunk))
   allocate(Mmat(norb_ex_cut,norb_ex_cut))
@@ -1029,12 +1051,17 @@ subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg)
         do nnp = 1, norb_ex_cut
           Bmat(nnp,1:nw_this) = conjg(xme_ex(njpp,nnp)) / (omegap_c(1:nw_this) - e_ex(nnp))
         end do
-        ! Pi^a_nm = i (E_n - E_m) X^a_nm
-        do nnp = 1, norb_ex_cut
-          do nn = 1, norb_ex_cut
-            Mmat(nn,nnp) = ci*(e_ex(nn)-e_ex(nnp))*xme_ex_inter(nj,nn,nnp)
+        if (use_bare) then
+          ! bare exciton-exciton current P^a_nm (Eq. A10 with o = v); see bare_term3 above
+          Mmat = vme_ex_inter(nj,:,:)
+        else
+          ! Pi^a_nm = i (E_n - E_m) X^a_nm
+          do nnp = 1, norb_ex_cut
+            do nn = 1, norb_ex_cut
+              Mmat(nn,nnp) = ci*(e_ex(nn)-e_ex(nnp))*xme_ex_inter(nj,nn,nnp)
+            end do
           end do
-        end do
+        end if
         call zgemm('N','N', norb_ex_cut, nw_this, norb_ex_cut, cone, Mmat, norb_ex_cut, &
                     Bmat, norb_ex_cut, czero, Wmat, norb_ex_cut)
         do njp = 1, 3
@@ -1042,7 +1069,11 @@ subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg)
             Amat(nn,1:nw_this) = xme_ex(njp,nn) / (omega_c(1:nw_this) + e_ex(nn))
           end do
           term_total(1:nw_this) = sum(Amat(:,1:nw_this)*Wmat(:,1:nw_this), dim=1)
-          sigma_shg(nj,njp,njpp,iw0:iw1) = sigma_shg(nj,njp,njpp,iw0:iw1) &
+          ! FIELD PAIRING (Eq. A9b): in term 3, U_n carries the w_q field and U*_m the w_p field, so the X_n
+          ! factor (with hw_q + E_n) is the c index and the X*_m factor (with hw_p - E_m) the b index. Stored at
+          ! (a, b = njpp, c = njp). Only the b<->c antisymmetric part depends on this: with the indices the other way
+          ! round the injection current (circular light, buckled hBN) had the opposite sign to a real-time propagation.
+          sigma_shg(nj,njpp,njp,iw0:iw1) = sigma_shg(nj,njpp,njp,iw0:iw1) &
               - prefA*term_total(1:nw_this)
         end do
       end do
@@ -1056,7 +1087,7 @@ end subroutine get_second_intens_ex_methodA
 ! SHG entry point, kept with its original signature so the long-validated driver and
 ! tests/test_shg_real_data.f90 are untouched. It is now just the omega_q = omega_p branch of
 ! get_second_intens_ex_methodB: hw_p = hw_q = omega + i*eta and hw2 = 2*omega + 2i*eta, which is
-! CLAUDE.md's rule that omega_2 must be the SUM of the two complex frequencies.
+! the paper's convention: omega_2 is the SUM of the two complex frequencies.
 subroutine get_shg_intens_ex_matrix_methodB(wp, eta2, sigma_shg)
   implicit none
   real(8),    intent(in)    :: wp(nw), eta2
@@ -1073,21 +1104,29 @@ subroutine get_shg_intens_ex_matrix_methodB(wp, eta2, sigma_shg)
   deallocate(hwp, hwq, hw2)
 end subroutine get_shg_intens_ex_matrix_methodB
 
+
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! GENERAL excitonic second-order conductivity sigma^{abc}(w_p+w_q; w_p, w_q), Eq. (B1b).
-! Mirrors get_sigma_general_sp (HANDOFF 8.36): the physical tensor is the intrinsic-permutation
-! average over the PAIRS (alpha,w_p) <-> (beta,w_q),
+! GENERAL excitonic second-order conductivity sigma^{abc}(w_p+w_q; w_p, w_q), Taghizadeh & Pedersen
+! PRB 97, 205432 (2018), Eqs. (B1a)/(B1b). Mirrors get_sigma_general_sp: the physical tensor is the
+! intrinsic-permutation average over the PAIRS (alpha,w_p) <-> (beta,w_q),
 !     sigma_sym^{a,b,c}(wp,wq) = 1/2 [ sigma^{a,b,c}(wp,wq) + sigma^{a,c,b}(wq,wp) ],
 ! implemented as two passes with (hwp,hwq) swapped, the second transposed in (b,c). For w_p = w_q the
 ! two passes coincide and it degenerates to the plain b<->c swap get_sigma_shg_ex already did.
+!
+! EVERY point, the DC line included, uses the CAUSAL prescription: each frequency carries +i*eta and
+! hw_2 = hw_p + hw_q. So Response = rectification is the whole sigma(0; w, -w): the symmetric real part
+! (on resonance the shift-current-like response, plus off-resonant terms) and the antisymmetric
+! imaginary part, which holds the injection current. It is continuous with the anti-diagonal of a 2D map
+! (identical, when the map contains w_2 = 0 points). The SHIFT CURRENT itself, in the convention of
+! npj Comput. Mater. 11, 13 (w_q = -(w + i eta), w_2 = 0, Eqs. 9-11), is Response = shift, a separate route
+! (get_sigma_shift_ex). The two differ through Eq. (A9b) term 3, the exciton populations and coherences,
+! which that convention cancels by construction: on buckled hBN (75x75 and 90x90) the symmetric real part
+! of the rectification is 0.53 of the shift current, mesh-converged; the difference comes from pairs of
+! distinct bound excitons, while in the continuum and in the non-interacting limit the two agree.
 !> Driver for the excitonic two-frequency response sigma^abc(w1+w2; w1, w2): builds the
 !! frequency pairs, picks method A or B, symmetrises and writes the result.
-!! On the 1D w_q = -w_p scan it switches to the DC convention -- w_q = -w_p as complex
-!! numbers, w_2 = 0 exactly, b<->c index symmetrisation at fixed frequencies and Re at the
-!! end -- because Eq. (B1a) term 3 cancels by time reversal only when its denominator
-!! (hw_q + E_n)(hw_p - E_m) is symmetric under n<->m, which needs w_q = -w_p exactly.
-!! The 2D map deliberately keeps the resonant-branch convention even at its isolated
-!! w_2 = 0 points, so its anti-diagonal is a sum-frequency response, NOT a shift current.
+!! Method A (term 3 on the bare current) is used wherever w_2 = 0 is in range -- the 1D w_q = -w_p scan
+!! (rectification) and 2D maps containing such points; method B elsewhere.
 !! @param tag  'electrooptic', 'rectification' or 'general'; names the output file.
 !! @return void
 subroutine get_sigma_general_ex(tag)
@@ -1098,7 +1137,7 @@ subroutine get_sigma_general_ex(tag)
   real(8),    allocatable :: wpg(:), wqg(:)
   complex(8), allocatable :: hwp(:), hwq(:), hw2(:)
   complex(8), allocatable :: sigA(:,:,:,:), sigB(:,:,:,:), sigS(:,:,:,:)
-  logical :: same_freq, use_methodA, dc_branch
+  logical :: same_freq, use_methodA
 
   if (.not. inter_terms_ready) then
     write(*,*) 'ERROR (sigma_second_ex): xme_ex_inter not populated -- get_ome_ex needs iflag_norder=2.'
@@ -1108,42 +1147,19 @@ subroutine get_sigma_general_ex(tag)
   eta2 = eta/27.211385d0
   call build_freq_pairs(nfreq, wpg, wqg)
 
-  ! DC BRANCH (HANDOFF 8.42). On the 1D r = -1 scan (w_q = -w_p, i.e. Response = rectification)
-  ! the broadening convention is NOT the resonant-branch one. Eq. (B1a) term 3's denominator
-  !     D_nm = (hbar w_q + E_n)(hbar w_p - E_m)
-  ! is symmetric under n <-> m only if w_q = -w_p as COMPLEX numbers: then D_nm = (E_n - z)(z - E_m)
-  ! with z = w + i*eta, and (E_m - z)(z - E_n) is the same product. With X real and Pi antisymmetric
-  ! (time reversal, paper Appendix B) the numerator is antisymmetric under n <-> m combined with
-  ! b <-> c, so term 3 then cancels EXACTLY under the b <-> c symmetrisation (measured: 1.8e-7 of
-  ! terms 1+2). Under the resonant-branch convention w_q = -w + i*eta the denominator is instead
-  ! (E_n - conjg(z))(z - E_m), which is NOT symmetric; term 3 survives with a 1/eta^2 double pole at
-  ! the near-degenerate exciton pairs (38234 pairs with |E_n - E_m| < eta in the hBN IPA-limit set)
-  ! and then EXCEEDS terms 1+2 (measured 1.95x). That is what made this branch fail the IPA limit.
-  ! As 8.38b/8.38c record, w_q = -w_p is incompatible with the (alpha,w_p) <-> (beta,w_q) PAIR
-  ! average, which annihilates the result identically; the Eq. 9 shift route avoids the clash by
-  ! symmetrising over the INDICES b <-> c only, at fixed frequencies, so the DC branch does the same.
-  ! RESTRICTED to the 1D r = -1 scan on purpose: on the 2D grid only isolated points have w_2 = 0 and
-  ! switching prescription there would put an O(1) discontinuity along the anti-diagonal (8.38c), so
-  ! the map keeps the convention it was validated with.
-  dc_branch = (.not. two_freq_grid) .and. (abs(freq_ratio + 1.0d0) < 1.0d-8)
-
   allocate(hwp(nfreq), hwq(nfreq), hw2(nfreq))
   do idx = 1, nfreq
     hwp(idx) = cmplx(wpg(idx), eta2, 8)
-    if (dc_branch) then
-      hwq(idx) = -hwp(idx)                 ! omega-only broadening: the SAME complex z, used as -z
-      hw2(idx) = (0.0d0, 0.0d0)            ! exactly zero (no eta on the w_2 pole)
-    else
-      hwq(idx) = cmplx(wqg(idx), eta2, 8)
-      hw2(idx) = hwp(idx) + hwq(idx)
-    end if
+    hwq(idx) = cmplx(wqg(idx), eta2, 8)
+    hw2(idx) = hwp(idx) + hwq(idx)
   end do
 
-  ! METHOD SELECTION (HANDOFF 8.38). Eq. (B1b) (method B) carries an overall i*hbar*omega_2 and so is
-  ! identically ZERO at omega_2 = 0. Eq. (B1a) (method A) has no such prefactor and stays finite there,
-  ! so rectification -- and any grid point with omega_2 ~ 0 -- must go through method A. The two are
-  ! equivalent wherever both are defined (paper Sec. III; verified here at r = 1), so B stays the default
-  ! for the resonant branches where it is the long-validated production route.
+  ! METHOD SELECTION. Where w_2 = 0 is in range (the DC line, w_2 = 2i eta there) method A, Eq. (B1a), with
+  ! term 3 on the bare exciton-exciton current (bare_term3 in get_second_intens_ex_methodA): there term 3
+  ! carries the injection current, and Pi_nm = i(E_n-E_m) X_nm, which has no diagonal, resolves it only
+  ! with the k-mesh. Method B, Eq. (B1b), elsewhere: it is equivalent to method A with Pi and the
+  ! long-validated production route of the resonant branches, where term 3 is a small part (0.1% of the
+  ! SHG on buckled hBN).
   use_methodA = (.not. two_freq_grid) .and. (abs(freq_ratio + 1.0d0) < 1.0d-8)
   if (two_freq_grid) then
     if (minval(abs(wpg+wqg)) < 1.0d-8) use_methodA = .true.
@@ -1156,14 +1172,10 @@ subroutine get_sigma_general_ex(tag)
   write(*,*) '    Evaluating second-order conductivity (ex): ', trim(tag)
   if (use_methodA) then
     write(*,'(A,I0,A,I0,A)') '        ', nfreq, ' frequency pairs, ', norb_ex_cut, &
-                             ' excitons  [method A, Eq. (B1a): omega_2 = 0 is in range]'
-    if (dc_branch) write(*,'(A)') "        DC branch: w_q = -w_p, w_2 = 0, b<->c symmetrisation only"
-    call get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigA)
-    if (same_freq .or. dc_branch) then
-      sigB = sigA                          ! dc_branch: b<->c index symmetrisation at FIXED
-    else                                   ! frequencies (Eq. 9 prescription), NO pair average
-      call get_second_intens_ex_methodA(nfreq, hwq, hwp, hw2, sigB)
-    end if
+      ' excitons  [method A, Eq. (B1a), term 3 on the bare current: omega_2 = 0 is in range]'
+    write(*,'(A)') '        causal prescription (every frequency + i*eta); Re = full DC response, Im = injection channel'
+    call get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigA, bare_term3=.true.)
+    call get_second_intens_ex_methodA(nfreq, hwq, hwp, hw2, sigB, bare_term3=.true.)
   else
     write(*,'(A,I0,A,I0,A)') '        ', nfreq, ' frequency pairs, ', norb_ex_cut, &
                              ' excitons  [method B, Eq. (B1b)]'
@@ -1175,6 +1187,9 @@ subroutine get_sigma_general_ex(tag)
     end if
   end if
 
+  ! Both field orderings are evaluated explicitly. On the DC line the swapped pass is NOT the complex
+  ! conjugate of the first (they differ by O(1) on buckled hBN), but the symmetrised sum obeys the reality
+  ! of the current: its Re is b<->c symmetric and its Im antisymmetric to 1e-15 relative.
   do nj = 1,3
     do njp = 1,3
       do njpp = 1,3
@@ -1183,13 +1198,8 @@ subroutine get_sigma_general_ex(tag)
     end do
   end do
 
-  ! DC branch: sigma(0; w, -w) is REAL (Sipe & Shkrebtii 2000 Sec. VII; verified here to 1e-12 on the
-  ! resonant-convention branch). Keeping Re is exactly equivalent to get_shift_kernel_ex_static's
-  ! S -> Re[S] projection (SI Note 5 of npj Comput. Mater. 11, 13): that projection is a measured no-op
-  ! on Re (1.8e-7 relative, HANDOFF 8.42) while the projected result is real by construction, so
-  ! Re[sigma_unprojected] = sigma_projected. Without this the dispersive residue survives as a spurious
-  ! Im at 66% of Re.
-  if (dc_branch) sigS = cmplx(dble(sigS), 0.0d0, 8)
+  ! PHYSICAL SIGN, for the reason given in get_sigma_shg_ex (fixed by the real-time simulation).
+  sigS = -sigS
 
   call print_second_general_ex(nfreq, wpg, wqg, sigS, tag)
   deallocate(wpg, wqg, hwp, hwq, hw2, sigA, sigB, sigS)
@@ -1239,7 +1249,7 @@ end subroutine print_second_general_ex
 
     ! serial on purpose (audit 2026-09-24): this loop is pure file I/O and every iteration was
     ! inside !$omp ordered, which serialises it completely -- the parallel wrapper only added
-    ! thread spawn and synchronisation cost. HANDOFF 8.35.
+    ! thread spawn and synchronisation cost..
     do iw = 1, nw
       write(iounit90,*) wp(iw)*27.211385d0, &
         realpart(feps*sigma_w_ex(1,1,1,iw)), realpart(feps*sigma_w_ex(1,1,2,iw)), &
@@ -1267,7 +1277,7 @@ end subroutine print_second_general_ex
   ! shg_ex_lengthgauge_<material>.dat.
   ! Columns: hbar*omega (eV) -- the FUNDAMENTAL (driving) photon energy, NOT 2*hbar*omega --
   ! then for a=x,y,z; b=x,y,z; c=x,y,z (c fastest): Re, Im.
-  ! AXIS CONVENTION CHANGED 2026-09-24 (HANDOFF 8.33), same change and same reasons as
+  ! AXIS CONVENTION CHANGED 2026-09-24, same change and same reasons as
   ! print_shg_second_sp: a two-photon resonance of an exciton at energy E_N now appears at
   ! hbar*omega = E_N/2, a one-photon resonance at hbar*omega = E_N. Files written before this
   ! date carry the old 2*hbar*omega axis.

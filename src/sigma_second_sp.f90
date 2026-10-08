@@ -1,7 +1,7 @@
 module sigma_second_sp
   use constants_math
   use parser_input_file, &
-  only:nf,e1,e2,eta,nw,response_text,broadening_type_text, &
+  only:nf,e1,e2,eta,nw,response_text,broadening_type_text,sp_covariant,build_freq_pairs, &
   freq_ratio,e1b,e2b,nwb,two_freq_grid
   use parser_wannier90_tb, &
   only:material_name
@@ -12,6 +12,7 @@ module sigma_second_sp
   rkxvector,rkyvector,rkzvector !k-vectors only used for testing
   use ome_ex, &
   only:read_ome_sp_nonlinear !routine
+  use ome_sp, only: cov_exact_tol
   implicit none
 
   contains
@@ -31,6 +32,15 @@ module sigma_second_sp
     ! gauge-fixed (parallel-transported) complex generalized derivative of v, (v^c_nm);k^a; needed by SHG only
     complex*16, allocatable :: vme_der_pt_ex_band(:,:,:,:,:)
     logical :: vme_der_pt_found
+    ! Response = shift_covariant: allocated only for that response (an unallocated actual
+    ! argument is an absent optional one, F2008)
+    complex*16, allocatable :: cov_rgen_ex_band(:,:,:,:,:), cov_vraw_ex_band(:,:,:,:)
+    integer,    allocatable :: cov_blk_ex_band(:,:)
+    logical :: cov_found
+    ! Response = shg_covariant
+    complex*16, allocatable :: cov_nb_T(:,:,:,:), cov_nb_r(:,:,:,:,:), cov_xi(:,:,:,:)
+    real*8,     allocatable :: cov_nb_e(:,:,:)
+    logical :: shgcov_found
 
     !energies and vme in k-mesh and auxiliary arrays (sp)
     dimension ek(npointstotal,nband_ex)
@@ -56,10 +66,21 @@ module sigma_second_sp
     !read matrix elements from file
     allocate(vme_abs_der_ex_band(npointstotal,3,3,nband_ex,nband_ex))
     allocate(vme_der_pt_ex_band(npointstotal,3,3,nband_ex,nband_ex))
+    cov_found = .false.; shgcov_found = .false.
+    if (sp_cov_second()) then
+      allocate(cov_nb_T(npointstotal,6,nband_ex,nband_ex), cov_nb_r(npointstotal,7,3,nband_ex,nband_ex))
+      allocate(cov_nb_e(npointstotal,7,nband_ex), cov_xi(npointstotal,3,nband_ex,nband_ex))
+    end if
+    if (trim(response_text) == 'shift_covariant' .or. sp_cov_second()) then
+      allocate(cov_rgen_ex_band(npointstotal,3,3,nband_ex,nband_ex), cov_vraw_ex_band(npointstotal,3,nband_ex,nband_ex))
+      allocate(cov_blk_ex_band(npointstotal,nband_ex))
+    end if
     call read_ome_sp_nonlinear(iflag_norder,npointstotal,nband_ex,berry_eigen_ex_band, &
                                    gen_der_ex_band,shift_vector_ex_band,vme_ex_band,ek, &
                                    vme_abs_der_ex_band,vme_abs_der_found, &
-                                   vme_der_pt_ex_band,vme_der_pt_found)
+                                   vme_der_pt_ex_band,vme_der_pt_found, &
+                                   cov_rgen_ex_band,cov_vraw_ex_band,cov_blk_ex_band,cov_found, &
+                                   cov_nb_T,cov_nb_r,cov_nb_e,cov_xi,shgcov_found)
     write(*,*) '    Optical matrix elements (sp) have been read from file'
     if (response_text == 'shift_shiftvector' .and. .not. vme_abs_der_found) then
       write(*,*) 'ERROR (sigma_second_sp): the .omesp file has no derivative of |v| (it was written by an'
@@ -68,43 +89,65 @@ module sigma_second_sp
     end if
     if ((response_text == 'shg' .or. response_text == 'electrooptic' .or. &
          response_text == 'rectification' .or. response_text == 'general') &
-        .and. .not. vme_der_pt_found) then
+        .and. .not. sp_covariant .and. .not. vme_der_pt_found) then
       write(*,*) 'ERROR (sigma_second_sp): the .omesp file has no gauge-fixed generalized derivative of v'
       write(*,*) '       (it was written by an older version). Regenerate it with OME_sp = nonlinear; shg needs it.'
       stop 1
     end if
 
+    if (sp_cov_second() .and. .not. shgcov_found) then
+      write(*,*) 'ERROR (sigma_second_sp): the .omesp file has no covariant second-order data (it was written by an'
+      write(*,*) '       older version, or by a shift run of one). Regenerate it once with OME_sp = nonlinear: every'
+      write(*,*) '       second-order Response then reads it with OME_sp = none.'
+      stop 1
+    end if
+    if (trim(response_text) == 'shift_covariant' .and. .not. cov_found) then
+      write(*,*) 'ERROR (sigma_second_sp): the .omesp file has no block-covariant derivative (it was written by an'
+      write(*,*) '       older version). Regenerate it once with OME_sp = nonlinear: every second-order Response then'
+      write(*,*) '       reads it with OME_sp = none.'
+      stop 1
+    end if
+
     !compute shift conductivity
     if (nwp.eq.1 .and. nwq.eq.(-1)) then
-      call get_sigma_shift_sp(npointstotal,nband_ex,berry_eigen_ex_band, &
+      if (trim(response_text) == 'shift_covariant') then
+        call get_sigma_shift_cov_sp(npointstotal,nband_ex,ek,shift_vector_ex_band, &
+                                    cov_vraw_ex_band,cov_rgen_ex_band,cov_blk_ex_band)
+      else
+        call get_sigma_shift_sp(npointstotal,nband_ex,berry_eigen_ex_band, &
                         gen_der_ex_band,shift_vector_ex_band,vme_ex_band,ek,vme_abs_der_ex_band)
+      end if
     end if
 
     !compute shg susceptibility (the w_q = w_p branch; kept as its own entry point so the
     ! long-validated SHG output file and path are untouched)
-    if (nwp.eq.1 .and. nwq.eq.1 .and. response_text == 'shg') then
-      call get_sigma_shg_sp(npointstotal,nband_ex,vme_ex_band,ek,vme_der_pt_ex_band)
+    if (nwp.eq.1 .and. nwq.eq.1 .and. (response_text == 'shg' .or. trim(response_text) == 'shg_covariant')) then
+      if (sp_covariant) then
+        call get_sigma_second_cov_sp(npointstotal,nband_ex,cov_blk_ex_band,cov_nb_T,cov_nb_r,cov_nb_e,cov_xi,'shg')
+      else
+        call get_sigma_shg_sp(npointstotal,nband_ex,vme_ex_band,ek,vme_der_pt_ex_band)
+      end if
     end if
 
     ! general second-order sigma^{abc}(w_p+w_q; w_p, w_q), Eq. (A3a). nwq = 0 is the electro-optic
     ! (Pockels) branch sigma(w; w, 0); nwq = -1 optical rectification sigma(0; w, -w); 'general' uses
-    ! Frequency_ratio or the Energy_variables_2 grid. HANDOFF 8.36.
-    if (response_text == 'electrooptic') then
+    ! Frequency_ratio or the Energy_variables_2 grid..
+    if (sp_covariant .and. (response_text == 'electrooptic' .or. response_text == 'rectification' .or. &
+                            response_text == 'general')) then
+      call get_sigma_second_cov_sp(npointstotal,nband_ex,cov_blk_ex_band,cov_nb_T,cov_nb_r,cov_nb_e,cov_xi, &
+                                   trim(response_text))
+    else if (response_text == 'electrooptic') then
       freq_ratio = 0.0d0; two_freq_grid = .false.
       call get_sigma_general_sp(npointstotal,nband_ex,vme_ex_band,ek,vme_der_pt_ex_band,'electrooptic')
     else if (response_text == 'rectification') then
-      ! This branch DOES reproduce the shift current (HANDOFF 8.36c). Verified on hBN over 1-16 eV:
+      ! This branch DOES reproduce the shift current. Verified on hBN over 1-16 eV:
       ! both this and shift_shiftvector peak at 8.57 eV, both have the same eta dependence (peak ratio
       ! 1.378 vs 1.373 when eta halves), and across the whole resonant region
       !     sigma_A3a / sigma_shift = -0.2479 +- 0.011  (eta = 0.05; scatter shrinks as eta -> 0),
-      ! i.e. a constant factor of -1/4. The sign and the 1/4 are convention (the shift code carries the
-      ! paper's -pi/2 and the (I^abc + I^acb) form; a real field also brings the usual factor of 2), NOT
-      ! a physics difference. An earlier note here claimed this branch was an "O(eta) regulator residue
-      ! with no resonant structure" -- that was WRONG, drawn from a 1.5-6.0 eV scan that never reached
-      ! hBN's 7.25 eV gap. Retracted; see HANDOFF 8.36c.
-      write(*,*) '    NOTE: the rectification branch reproduces the shift current up to a constant'
-      write(*,*) '          factor of -1/4 (convention; HANDOFF 8.36c). For the production shift'
-      write(*,*) '          current use Response = shift_shiftvector.'
+      ! i.e. a constant factor of -1/4 -- RESOLVED 2026-10-06: the 1/4 was the 2017 vs 2018 definition
+      ! of J(2) and the sign was the electron charge counted twice; both are now corrected in get_sigma_general_sp,
+      ! and on resonance this branch equals the shift current (+1). Off resonance it is the full rectification,
+      ! which the shift formula does not contain. This per-band route is only used with Sp_method = per_band.
       freq_ratio = -1.0d0; two_freq_grid = .false.
       call get_sigma_general_sp(npointstotal,nband_ex,vme_ex_band,ek,vme_der_pt_ex_band,'rectification')
     else if (response_text == 'general') then
@@ -114,9 +157,489 @@ module sigma_second_sp
 
     deallocate(vme_abs_der_ex_band)
     deallocate(vme_der_pt_ex_band)
+    if (allocated(cov_rgen_ex_band)) deallocate(cov_rgen_ex_band, cov_vraw_ex_band, cov_blk_ex_band)
+    if (allocated(cov_nb_T)) deallocate(cov_nb_T, cov_nb_r, cov_nb_e, cov_xi)
 
+  contains
+    ! the covariant method-B kernel is used (and its .omesp data needed) for these responses
+    logical function sp_cov_second()
+      sp_cov_second = sp_covariant .and. (response_text == 'shg' .or. trim(response_text) == 'shg_covariant' .or. &
+          response_text == 'electrooptic' .or. response_text == 'rectification' .or. response_text == 'general')
+    end function sp_cov_second
   end subroutine get_sigma_second_sp
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  !> Covariant single-particle second-order response (Sp_method = covariant, the DEFAULT):
+  !! Taghizadeh & Pedersen PRB 97, 205432 (2018) Eq. (B1b) (method B) in the NON-INTERACTING limit, evaluated on the
+  !! k-mesh: transitions n = (c, v, k), X_n = r_vc, and the exciton-exciton position acting on a transition field
+  !!     (X^b F)_cv = (r^b_CC F - F r^b_VV)_cv + i (D_b F)_cv,    D_b F = d_b F - i [xi^b_B, F],
+  !! with r between DIFFERENT blocks and xi_B the intra-block connection (get_rgen_blocks); d_b acts on the actual
+  !! F = r^c_cv/(z -+ E_cv), built in each neighbour's eigenbasis and block-transported. The intra-block couplings
+  !! cancel identically (no lineshape term, no degeneracy cut).
+  !! FREQUENCIES: CAUSAL prescription for every branch -- each frequency + i*eta and w_2 = w_p + w_q as complex numbers
+  !! (rectification: w_q = -w + i*eta, w_2 = 2i*eta; method B stays finite since w_2 /= 0). Checked against a real-time
+  !! propagation of hBN (tools/check_realtime_sign.py): DC current to 0.2% including its off-resonant
+  !! part, SHG to 1e-4, general (6 + 3 eV) likewise. Intrinsic-permutation average over the pairs (b, w_p) <-> (c, w_q).
+  !! CONVENTION: J(2)(t) = 1/4 sum sigma E E e^... (2018 / npj, the opticx-wide convention since 2026-10-06) and the
+  !! PHYSICAL sign: Taghizadeh's expressions already contain the electron charge, so the kernel (written with e = 1)
+  !! is multiplied by -1 here to cancel the e^3 = -1 that sigma2_au_to_si applies.
+  !! @param tag  'shg' (written to shg_sp_lengthgauge_*), or 'electrooptic' / 'rectification' / 'general'.
+  subroutine get_sigma_second_cov_sp(npointstotal, nband_ex, blk, nbT, nbr, nbe, xi, tag)
+  implicit none
+  integer,    intent(in) :: npointstotal, nband_ex, blk(npointstotal, nband_ex)
+  complex*16, intent(in) :: nbT(npointstotal,6,nband_ex,nband_ex), nbr(npointstotal,7,3,nband_ex,nband_ex)
+  complex*16, intent(in) :: xi(npointstotal,3,nband_ex,nband_ex)
+  real*8,     intent(in) :: nbe(npointstotal,7,nband_ex)
+  character(len=*), intent(in) :: tag
+  real*8,     allocatable :: wpg(:), wqg(:), wp(:)
+  complex*16, allocatable :: zp(:), zq(:), z2(:), sigA(:,:,:,:), sigB(:,:,:,:), sigS(:,:,:,:)
+  real*8  :: eta2
+  integer :: nfreq, idx, a, b, c
+  logical :: same_freq
+
+  eta2 = eta/27.211385d0
+  if (tag == 'shg') then
+    nfreq = nw
+    allocate(wpg(nfreq), wqg(nfreq), wp(nfreq))
+    call initialize_sigma_second_arrays_w(nw, wp)
+    wpg = wp; wqg = wp
+    same_freq = .true.
+  else
+    if (tag == 'electrooptic') then
+      freq_ratio = 0.0d0; two_freq_grid = .false.
+    else if (tag == 'rectification') then
+      freq_ratio = -1.0d0; two_freq_grid = .false.
+    end if
+    call build_freq_pairs(nfreq, wpg, wqg)
+    same_freq = (.not. two_freq_grid) .and. (abs(freq_ratio - 1.0d0) < 1.0d-12)
+  end if
+  allocate(zp(nfreq), zq(nfreq), z2(nfreq), sigA(3,3,3,nfreq), sigB(3,3,3,nfreq), sigS(3,3,3,nfreq))
+  do idx = 1, nfreq
+    zp(idx) = cmplx(wpg(idx), eta2, 8)
+    zq(idx) = cmplx(wqg(idx), eta2, 8)
+    z2(idx) = zp(idx) + zq(idx)                ! never 0: carries 2i*eta
+  end do
+  write(*,*) '    Evaluating second-order conductivity (sp), covariant method B: ', trim(tag)
+  write(*,'(A,I0,A)') '        ', nfreq, ' frequency pairs (causal prescription, every frequency + i*eta)'
+  call run_cov(zp, zq, sigA)
+  if (same_freq) then
+    sigB = sigA
+  else
+    call run_cov(zq, zp, sigB)
+  end if
+  do a = 1, 3
+    do b = 1, 3
+      do c = 1, 3
+        sigS(a,b,c,:) = -0.5d0*(sigA(a,b,c,:) + sigB(a,c,b,:))      ! pair average; -1: physical sign (header)
+      end do
+    end do
+  end do
+  if (tag == 'shg') then
+    call print_shg_second_sp(nfreq, wpg, sigS)
+    write(*,*) '    SHG susceptibility (sp) has been printed'
+  else
+    call print_second_general_sp(nfreq, wpg, wqg, sigS, tag)
+  end if
+  deallocate(wpg, wqg, zp, zq, z2, sigA, sigB, sigS)
+  if (allocated(wp)) deallocate(wp)
+
+  contains
+    subroutine run_cov(zpp, zqq, sig)
+      complex*16, intent(in)  :: zpp(nfreq), zqq(nfreq)
+      complex*16, intent(out) :: sig(3,3,3,nfreq)
+      complex*16, allocatable :: sig_t(:,:,:,:), T_k(:,:,:), r_k(:,:,:,:), xi_k(:,:,:)
+      real*8,     allocatable :: e_k(:,:)
+      integer,    allocatable :: lab_k(:)
+      integer :: ibz
+      sig = (0.0d0,0.0d0)
+      !$OMP PARALLEL DEFAULT(NONE) SHARED(npointstotal, nband_ex, blk, nbT, nbr, nbe, xi, nfreq, zpp, zqq, z2, sig) &
+      !$OMP   PRIVATE(ibz, sig_t, T_k, r_k, xi_k, e_k, lab_k)
+      allocate(sig_t(3,3,3,nfreq), T_k(6,nband_ex,nband_ex), r_k(7,3,nband_ex,nband_ex), xi_k(3,nband_ex,nband_ex))
+      allocate(e_k(7,nband_ex), lab_k(nband_ex))
+      sig_t = (0.0d0,0.0d0)
+      !$OMP DO SCHEDULE(DYNAMIC)
+      do ibz = 1, npointstotal
+        T_k = nbT(ibz,:,:,:); r_k = nbr(ibz,:,:,:,:); xi_k = xi(ibz,:,:,:); e_k = nbe(ibz,:,:); lab_k = blk(ibz,:)
+        call get_second_intens_cov(nband_ex, nfreq, zpp, zqq, z2, lab_k, T_k, r_k, e_k, xi_k, sig_t)
+      end do
+      !$OMP END DO
+      !$OMP CRITICAL
+      sig = sig + sig_t
+      !$OMP END CRITICAL
+      deallocate(sig_t, T_k, r_k, xi_k, e_k, lab_k)
+      !$OMP END PARALLEL
+    end subroutine run_cov
+  end subroutine get_sigma_second_cov_sp
+
+  ! the frequency grid of initialize_sigma_second_arrays, without touching any sigma array
+  subroutine initialize_sigma_second_arrays_w(nw_, wp_)
+    integer, intent(in) :: nw_
+    real*8,  intent(out) :: wp_(nw_)
+    integer :: i
+    do i = 1, nw_
+      wp_(i) = (e1 + (e2 - e1)/dble(nw_)*dble(i-1))/27.211385d0
+    end do
+  end subroutine initialize_sigma_second_arrays_w
+
+  !> One k-point of get_sigma_second_cov_sp: the three terms of Eq. (B1b) for non-interacting transitions at
+  !! complex frequencies (zp, zq, z2), prefactor i hbar w_2/(N V) (C_ee = 1, 2018 convention, kernel sign e = 1).
+  !! F fields: term 1 r/(zq - E) and term 2 r/(conj(zq) + E) (acted on by X^b), term 3 r/(zp - E) (acted on by X^a).
+  !! Neighbour p: 1 x-, 3 x+, 2 y-, 4 y+, 5 z-, 6 z+, 7 centre (as get_berry_eigen_fourpoint).
+  subroutine get_second_intens_cov(nb, nw, zp, zq, z2, lab, Tn, rn, en, xi, sig)
+  implicit none
+  integer,    intent(in) :: nb, nw, lab(nb)
+  complex*16, intent(in) :: zp(nw), zq(nw), z2(nw), Tn(6,nb,nb), rn(7,3,nb,nb), xi(3,nb,nb)
+  real*8,     intent(in) :: en(7,nb)
+  complex*16, intent(inout) :: sig(3,3,3,nw)
+  ! Frequencies are processed in chunks of up to lch, with the frequency as the FASTEST index of every
+  ! work array, so each operation below is a vector operation over the chunk.
+  integer, parameter :: lch = 64
+  integer :: nv, nc, a, b, c, p, ig0, ig1, i, j, ii, jj, mode, nmode, m3, iw0, nl
+  real*8 :: ew(7,nb), Ecv(7,nb,nb)
+  complex*16, allocatable :: F(:,:,:,:,:,:), XF(:,:,:,:,:,:)   ! (iw, nc, nv, mode, c, p) / (iw, nc, nv, mode, b, c)
+  complex*16, allocatable :: G(:,:,:), Lm(:,:), Rm(:,:), Tc(:,:,:), Tv(:,:,:)
+  complex*16 :: pref(lch), t1(lch), t2(lch), t3(lch), zm(lch,3), x
+  logical :: samepq
+  complex*16, parameter :: ci = (0.0d0,1.0d0)
+  integer, parameter :: pplus(3) = (/3,4,6/), pminus(3) = (/1,2,5/)
+
+  nv = nv_ex; nc = nb - nv_ex
+  samepq = all(zp == zq)
+  nmode = 3; m3 = 3
+  if (samepq) then
+    nmode = 2; m3 = 1                              ! mode 3 (r/(zp - E)) IS mode 1 when zp = zq
+  end if
+  ! energies in the denominators: numerically degenerate groups at their mean (as get_shift_intens_cov)
+  do p = 1, 7
+    ew(p,:) = en(p,:)
+    ig0 = 1
+    do while (ig0 <= nb)
+      ig1 = ig0
+      do while (ig1 < nb)
+        if (en(p,ig1+1) - en(p,ig1) >= cov_exact_tol) exit
+        ig1 = ig1 + 1
+      end do
+      if (ig1 > ig0) ew(p,ig0:ig1) = sum(en(p,ig0:ig1))/dble(ig1 - ig0 + 1)
+      ig0 = ig1 + 1
+    end do
+    do j = 1, nv
+      do i = 1, nc
+        Ecv(p,i,j) = ew(p,nv+i) - ew(p,j)
+      end do
+    end do
+  end do
+
+  allocate(F(lch,nc,nv,nmode,3,7), XF(lch,nc,nv,nmode,3,3), G(lch,nc,nv), Lm(nc,nc), Rm(nv,nv))
+  allocate(Tc(nc,nc,6), Tv(nv,nv,6))
+  do p = 1, 6
+    Tc(:,:,p) = conjg(transpose(Tn(p,nv+1:nb,nv+1:nb))); Tv(:,:,p) = Tn(p,1:nv,1:nv)
+  end do
+  do iw0 = 1, nw, lch
+    nl = min(lch, nw - iw0 + 1)
+    zm(1:nl,1) = zq(iw0:iw0+nl-1); zm(1:nl,2) = conjg(zq(iw0:iw0+nl-1)); zm(1:nl,3) = zp(iw0:iw0+nl-1)
+    ! F fields: mode 1 r/(zq - E), mode 2 r/(conj(zq) + E), mode 3 r/(zp - E)
+    do p = 1, 7
+      do c = 1, 3
+        do j = 1, nv
+          do i = 1, nc
+            x = rn(p,c,nv+i,j)
+            F(1:nl,i,j,1,c,p) = x/(zm(1:nl,1) - Ecv(p,i,j))
+            F(1:nl,i,j,2,c,p) = x/(zm(1:nl,2) + Ecv(p,i,j))
+            if (nmode == 3) F(1:nl,i,j,3,c,p) = x/(zm(1:nl,3) - Ecv(p,i,j))
+          end do
+        end do
+      end do
+    end do
+    ! XF = [X^b, F]: (r^b_cc + xi^b_cc) F - F (r^b_vv + xi^b_vv) + i (T+^H F+ T+ - T-^H F- T-)/(2 dk)
+    do b = 1, 3
+      Lm = rn(7,b,nv+1:nb,nv+1:nb) + xi(b,nv+1:nb,nv+1:nb)
+      Rm = rn(7,b,1:nv,1:nv) + xi(b,1:nv,1:nv)
+      do c = 1, 3
+        do mode = 1, nmode
+          XF(1:nl,:,:,mode,b,c) = (0.0d0,0.0d0)
+          do j = 1, nv
+            do i = 1, nc
+              do ii = 1, nc
+                XF(1:nl,i,j,mode,b,c) = XF(1:nl,i,j,mode,b,c) + Lm(i,ii)*F(1:nl,ii,j,mode,c,7)
+              end do
+              do jj = 1, nv
+                XF(1:nl,i,j,mode,b,c) = XF(1:nl,i,j,mode,b,c) - F(1:nl,i,jj,mode,c,7)*Rm(jj,j)
+              end do
+            end do
+          end do
+          call add_transported(pplus(b),  ci/(2.0d0*dk))
+          call add_transported(pminus(b), -ci/(2.0d0*dk))
+        end do
+      end do
+    end do
+    pref(1:nl) = ci*z2(iw0:iw0+nl-1)/(dble(npointstotal)*vcell)
+    do a = 1, 3
+      do b = 1, 3
+        do c = 1, 3
+          t1(1:nl) = 0; t2(1:nl) = 0; t3(1:nl) = 0
+          do j = 1, nv
+            do i = 1, nc
+              ! X^a_n = r^a_vc; conj(X^a_n) = r^a_cv
+              t1(1:nl) = t1(1:nl) + rn(7,a,j,nv+i)/(z2(iw0:iw0+nl-1) - Ecv(7,i,j))*XF(1:nl,i,j,1,b,c)
+              t2(1:nl) = t2(1:nl) + rn(7,a,nv+i,j)/(z2(iw0:iw0+nl-1) + Ecv(7,i,j))*conjg(XF(1:nl,i,j,2,b,c))
+              ! term 3 field pairing (Eq. A9b): the X_n factor with (w_q + E_n) is the c field, the w_p factor b
+              t3(1:nl) = t3(1:nl) + rn(7,c,j,nv+i)/(zq(iw0:iw0+nl-1) + Ecv(7,i,j))*XF(1:nl,i,j,m3,a,b)
+            end do
+          end do
+          sig(a,b,c,iw0:iw0+nl-1) = sig(a,b,c,iw0:iw0+nl-1) + pref(1:nl)*(t1(1:nl) + t2(1:nl) - t3(1:nl))
+        end do
+      end do
+    end do
+  end do
+  deallocate(F, XF, G, Lm, Rm, Tc, Tv)
+
+  contains
+    ! XF(mode,b,c) += s * Tc^H F(mode,c,p) Tv, the neighbour field transported into the basis at k
+    subroutine add_transported(pp, s)
+      integer,    intent(in) :: pp
+      complex*16, intent(in) :: s
+      G(1:nl,:,:) = (0.0d0,0.0d0)
+      do j = 1, nv
+        do jj = 1, nv
+          do i = 1, nc
+            G(1:nl,i,j) = G(1:nl,i,j) + F(1:nl,i,jj,mode,c,pp)*Tv(jj,j,pp)
+          end do
+        end do
+      end do
+      do j = 1, nv
+        do i = 1, nc
+          do ii = 1, nc
+            XF(1:nl,i,j,mode,b,c) = XF(1:nl,i,j,mode,b,c) + s*Tc(i,ii,pp)*G(1:nl,ii,j)
+          end do
+        end do
+      end do
+    end subroutine add_transported
+  end subroutine get_second_intens_cov
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  !> Response = shift_covariant: single-particle shift conductivity from paper Eq. (9) of
+  !! Esteve-Paredes et al., npj Comput. Mater. 11, 13, with the U(n)-covariant generalised derivative of
+  !! get_rgen_blocks (ome_sp.f90) -- no shift-vector/amplitude split, no clip, no degeneracy cut.
+  !! Writes the same files as shift_shiftvector (shift_vector.dat is the same diagnostic).
+  subroutine get_sigma_shift_cov_sp(npointstotal, nband_ex, ek, shift_vector_ex_band, vraw, rgen, blk)
+  implicit none
+  integer,    intent(in) :: npointstotal, nband_ex
+  real*8,     intent(in) :: ek(npointstotal, nband_ex)
+  real*8,     intent(in) :: shift_vector_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+  complex*16, intent(in) :: vraw(npointstotal, 3, nband_ex, nband_ex)
+  complex*16, intent(in) :: rgen(npointstotal, 3, 3, nband_ex, nband_ex)
+  integer,    intent(in) :: blk(npointstotal, nband_ex)
+  real*8,     allocatable :: wp(:), shift_vector_w(:,:,:), shift_vector_w_t(:,:,:)
+  complex*16, allocatable :: sigma_w_sp(:,:,:,:), sigma_w_sp_t(:,:,:,:)
+  real*8 :: eta2
+  integer :: ibz, nexact, nexact_t
+  real*8,     allocatable :: e_k(:), sv_k(:,:,:,:)
+  complex*16, allocatable :: v_k(:,:,:), rg_k(:,:,:,:)
+  integer,    allocatable :: lab_k(:)
+
+  allocate(wp(nw), sigma_w_sp(3,3,3,nw), shift_vector_w(3,3,nw))
+  call initialize_sigma_second_arrays(nw, wp, eta2, sigma_w_sp)
+  shift_vector_w = 0.0d0
+  nexact = 0
+  write(*,*) '    Evaluating shift conductivity (sp), block-covariant generalised derivative...'
+
+  !$OMP PARALLEL DEFAULT(NONE) &
+  !$OMP   SHARED(npointstotal, nband_ex, ek, shift_vector_ex_band, vraw, rgen, blk, nw, wp, eta2, &
+  !$OMP          sigma_w_sp, shift_vector_w, nexact) &
+  !$OMP   PRIVATE(ibz, sigma_w_sp_t, shift_vector_w_t, nexact_t, e_k, sv_k, v_k, rg_k, lab_k)
+  allocate(sigma_w_sp_t(3,3,3,nw), shift_vector_w_t(3,3,nw))
+  allocate(e_k(nband_ex), sv_k(3,3,nband_ex,nband_ex), v_k(3,nband_ex,nband_ex), rg_k(3,3,nband_ex,nband_ex))
+  allocate(lab_k(nband_ex))
+  sigma_w_sp_t = (0.0d0,0.0d0); shift_vector_w_t = 0.0d0; nexact_t = 0
+  !$OMP DO SCHEDULE(DYNAMIC)
+  do ibz = 1, npointstotal
+    e_k = ek(ibz,:); v_k = vraw(ibz,:,:,:); rg_k = rgen(ibz,:,:,:,:); lab_k = blk(ibz,:)
+    sv_k = shift_vector_ex_band(ibz,:,:,:,:)
+    call get_shift_intens_cov(nband_ex, nw, e_k, v_k, rg_k, lab_k, sv_k, wp, eta2, sigma_w_sp_t, &
+         shift_vector_w_t, nexact_t)
+  end do
+  !$OMP END DO
+  !$OMP CRITICAL
+  sigma_w_sp = sigma_w_sp + sigma_w_sp_t
+  shift_vector_w = shift_vector_w + shift_vector_w_t
+  nexact = nexact + nexact_t
+  !$OMP END CRITICAL
+  deallocate(sigma_w_sp_t, shift_vector_w_t, e_k, sv_k, v_k, rg_k, lab_k)
+  !$OMP END PARALLEL
+
+  if (nexact > 0) write(*,*) '    pairs degenerate to numerical precision inside blocks (no lineshape term):', nexact
+  call print_sigma_second_sp(nw, wp, sigma_w_sp, shift_vector_w)
+  write(*,*) '    Shift conductivity (sp) has been printed'
+  deallocate(wp, sigma_w_sp, shift_vector_w)
+  end subroutine get_sigma_shift_cov_sp
+
+  !> One k-point of get_sigma_shift_cov_sp. With r^c_nm = -i v^c_nm/(E_n - E_m) (bands in different blocks),
+  !! r^{c;a} the block-covariant derivative and I^{abc}_nm = r^b_nm (r^{c;a}_nm)^*:
+  !!   (1) main term   Sum_{n cond, m val} Im(I^{abc} + I^{acb}) delta(w - w_nm)
+  !!   (2) lineshape term for split pairs inside a block (n, l, in the same block, E_n /= E_l): the per-band
+  !!       formula differs from the block one by i[xi_od, r] with xi_od = -i v_nl/(E_n - E_l) in the energy
+  !!       eigenbasis, weighted by PER-BAND lineshapes. The paired terms are antisymmetric under n <-> l, so
+  !!       they enter as Ga (delta(x1) + delta(x2))/(x1 - x2) (equals the per-band
+  !!       exact result to 1.6% on field-split MoS2 where the per-band formula is valid). Skipped for pairs
+  !!       degenerate to numerical precision (|E_n - E_l| < cov_exact_tol), where the block formula alone is
+  !!       the answer: there the eigensolver returns an arbitrary mixture, the term is basis dependent and is
+  !!       divided by a noise-level splitting. cov_exact_tol = 1e-6 Ha: the Gamma-M degeneracy of the MoS2
+  !!       Wannier model is split by 1e-10..1e-6 Ha (282 of 8100 k at 90x90); results are identical for
+  !!       1e-7..1e-5 Ha and wrong at 1e-8 (C3 18%), on F = 0 and on field-split F = 0.2 alike.
+  subroutine get_shift_intens_cov(nb, nw, e, v, rg, lab, sv, wp, eta2, sig, svw, nexact)
+  implicit none
+  integer,    intent(in)    :: nb, nw, lab(nb)
+  real*8,     intent(in)    :: e(nb), sv(3,3,nb,nb), wp(nw), eta2
+  complex*16, intent(in)    :: v(3,nb,nb), rg(3,3,nb,nb)
+  complex*16, intent(inout) :: sig(3,3,3,nw)
+  real*8,     intent(inout) :: svw(3,3,nw)
+  integer,    intent(inout) :: nexact
+  complex*16 :: r(3,nb,nb), z(3,3,3)
+  real*8 :: Isym(3,3,3), G1(3,3,3), G2(3,3,3), dl(nw), d2(nw), pref, x1, x2
+  real*8 :: ew(nb)          ! energies used in the lineshapes: numerically degenerate groups at their mean
+  integer :: ig0, ig1
+  integer :: n, m, l, a, b, c, nj, njp
+  complex*16, parameter :: ci = (0.0d0,1.0d0)
+
+  pref = 0.5d0*pi/(dble(npointstotal)*vcell)
+  ! Bands degenerate to numerical precision (consecutive gap < cov_exact_tol) get their group's mean energy
+  ! in every lineshape: their eigenvectors are an arbitrary mixture, and with per-band energies the main
+  ! term would depend on that mixture at order (splitting/eta) -- measured 3.6e-3 on MoS2 30x30 under
+  ! OPTICX_BLOCK_SCRAMBLE. Shifts any transition energy by < cov_exact_tol (27 ueV).
+  ew = e
+  ig0 = 1
+  do while (ig0 <= nb)
+    ig1 = ig0
+    do while (ig1 < nb)
+      if (e(ig1+1) - e(ig1) >= cov_exact_tol) exit
+      ig1 = ig1 + 1
+    end do
+    if (ig1 > ig0) ew(ig0:ig1) = sum(e(ig0:ig1))/dble(ig1 - ig0 + 1)
+    ig0 = ig1 + 1
+  end do
+  r = (0.0d0,0.0d0)
+  do m = 1, nb
+    do n = 1, nb
+      if (lab(n) /= lab(m)) r(:,n,m) = -ci*v(:,n,m)/(e(n) - e(m))
+    end do
+  end do
+
+  ! shift_vector.dat diagnostic, exactly as get_shift_intens_sp (both band orders, f_n - f_m)
+  do n = 1, nb
+    do m = 1, nb
+      if ((n <= nv_ex) .eqv. (m <= nv_ex)) cycle
+      call lineshape(e(n) - e(m), dl)
+      do nj = 1, 3
+        do njp = 1, 3
+          svw(nj,njp,:) = svw(nj,njp,:) + 1.0d0/(dble(npointstotal)*vcell) * &
+                          merge(1.0d0, -1.0d0, n <= nv_ex) * sv(nj,njp,n,m) * dl
+        end do
+      end do
+    end do
+  end do
+
+  ! (1) main term
+  do n = nv_ex + 1, nb
+    do m = 1, nv_ex
+      call lineshape(ew(n) - ew(m), dl)
+      do a = 1, 3
+        do b = 1, 3
+          do c = 1, 3
+            Isym(a,b,c) = aimag(r(b,n,m)*conjg(rg(a,c,n,m)) + r(c,n,m)*conjg(rg(a,b,n,m)))
+          end do
+        end do
+      end do
+      call add(Isym, dl)
+    end do
+  end do
+
+  ! (2) lineshape term, conduction blocks: n < l in the same block, partner m in the valence
+  do n = nv_ex + 1, nb
+    do l = n + 1, nb
+      if (lab(l) /= lab(n)) cycle
+      if (abs(ew(n) - ew(l)) < cov_exact_tol) then
+        nexact = nexact + 1; cycle
+      end if
+      do m = 1, nv_ex
+        call gc(n, l, m, G1); call gc(l, n, m, G2)
+        x1 = ew(n) - ew(m); x2 = ew(l) - ew(m)
+        call lineshape(x1, dl); call lineshape(x2, d2)
+        call add(0.5d0*(G1 - G2), (dl + d2)/(x1 - x2))
+      end do
+    end do
+  end do
+  ! valence blocks: l < m in the same block, partner n in the conduction
+  do l = 1, nv_ex
+    do m = l + 1, nv_ex
+      if (lab(l) /= lab(m)) cycle
+      if (abs(ew(l) - ew(m)) < cov_exact_tol) then
+        nexact = nexact + 1; cycle
+      end if
+      do n = nv_ex + 1, nb
+        call gv(n, l, m, G1); call gv(n, m, l, G2)
+        x1 = ew(n) - ew(m); x2 = ew(n) - ew(l)
+        call lineshape(x1, dl); call lineshape(x2, d2)
+        call add(0.5d0*(G1 - G2), (dl + d2)/(x1 - x2))
+      end do
+    end do
+  end do
+
+  contains
+    subroutine add(X, w)
+      real*8, intent(in) :: X(3,3,3), w(nw)
+      integer :: iw
+      do iw = 1, nw
+        sig(:,:,:,iw) = sig(:,:,:,iw) + pref*X*w(iw)
+      end do
+    end subroutine add
+    ! z_abc = r^b_nm (v^a_nl r^c_lm)^*, symmetrised over b <-> c, imaginary part
+    subroutine gc(n_, l_, m_, G)
+      integer, intent(in) :: n_, l_, m_
+      real*8, intent(out) :: G(3,3,3)
+      integer :: a_, b_, c_
+      do a_ = 1, 3
+        do b_ = 1, 3
+          do c_ = 1, 3
+            z(a_,b_,c_) = r(b_,n_,m_)*conjg(v(a_,n_,l_)*r(c_,l_,m_))
+          end do
+        end do
+      end do
+      do b_ = 1, 3
+        do c_ = 1, 3
+          G(:,b_,c_) = aimag(z(:,b_,c_) + z(:,c_,b_))
+        end do
+      end do
+    end subroutine gc
+    ! z_abc = r^b_nm (-r^c_nl v^a_lm)^*, symmetrised over b <-> c, imaginary part
+    subroutine gv(n_, l_, m_, G)
+      integer, intent(in) :: n_, l_, m_
+      real*8, intent(out) :: G(3,3,3)
+      integer :: a_, b_, c_
+      do a_ = 1, 3
+        do b_ = 1, 3
+          do c_ = 1, 3
+            z(a_,b_,c_) = r(b_,n_,m_)*conjg(-r(c_,n_,l_)*v(a_,l_,m_))
+          end do
+        end do
+      end do
+      do b_ = 1, 3
+        do c_ = 1, 3
+          G(:,b_,c_) = aimag(z(:,b_,c_) + z(:,c_,b_))
+        end do
+      end do
+    end subroutine gv
+    ! normalised lineshape delta(w - x), same two forms as get_shift_intens_sp
+    subroutine lineshape(x, d)
+      real*8, intent(in) :: x
+      real*8, intent(out) :: d(nw)
+      if (trim(broadening_type_text) == 'gaussian') then
+        d = 1.0d0/eta2/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(wp - x)**2)
+      else
+        d = 1.0d0/pi*aimag(1.0d0/(wp - x - cmplx(0.0d0, eta2, 8)))
+      end if
+    end subroutine lineshape
+  end subroutine get_shift_intens_cov
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
   subroutine get_sigma_shift_sp(npointstotal, nband_ex, berry_eigen_ex_band, &
                                gen_der_ex_band, shift_vector_ex_band, vme_ex_band, ek, vme_abs_der_ex_band)
   implicit none
@@ -270,9 +793,6 @@ end subroutine get_sigma_shift_sp
   complex*16 :: rb, rc
   real*8     :: dw, gb, gc
   real*8, parameter :: amp_tiny = 1.0d-10
-  ! same value and meaning as clip_threshold in ome_sp.f90 (used there to zero garbage shift vectors / Berry
-  ! connections): g below has the dimension of a length like R^{a,b}, so it gets the same treatment
-  real*8, parameter :: g_clip = 50.0d0
   ! energy window (Hartree, 2.7 meV) below which two bands count as degenerate; the code paper's SI Note 7 finds the
   ! shift current stable for such thresholds between 1e-2 and 1e-4 eV
   real*8, parameter :: eps_deg = 1.0d-4
@@ -282,8 +802,8 @@ end subroutine get_sigma_shift_sp
   ! reused across all nw frequencies (fix, code review #7, 2026-09-23): shift1/shift2 (shift_sumrule)
   ! and shift/rb/rc/gb/gc (shift_shiftvector) depend only on nn, nnp and the cartesian indices, never
   ! on wp(iw) -- only delta_nnp does. The old code recomputed the full 3x3x3 kernel from scratch at
-  ! every one of the nw frequencies (400 in the validation runs, up to 30000 in production -- see
-  ! CLAUDE.md "Performance context"), i.e. up to 30000x more work than necessary for a quantity that
+  ! every one of the nw frequencies (400 in the validation runs, up to 30000 in production runs),
+  ! i.e. up to 30000x more work than necessary for a quantity that
   ! does not depend on frequency at all.
   complex*16 :: shift_kernel(3, 3, 3)
  
@@ -338,11 +858,11 @@ end subroutine get_sigma_shift_sp
               ! sigma = (i*pi/2V) sum f_nn' (I^{abc}+I^{acb}) delta(w - w_nn'), paper Eq. 9 of Esteve-Paredes
               ! et al., npj Comput. Mater. 11, 13 (e = 1 in a.u.). It used to be +pi/2, the opposite sign; verified
               ! against the excitonic code's IPA limit (synthetic non-interacting excitons, hBN), which follows
-              ! paper Eq. 10 (see HANDOFF.md section 8.7).
+              ! paper Eq. 10.
               if (response_text == 'shift_sumrule') then
                 ! WARNING (unreliable, kept as is): the sum-rule generalised derivative needs a large band window
                 ! (remote bands). For a 2-band model its imaginary part vanishes identically (result ~ 0), and on
-                ! GeS with the full 27-band window it disagrees strongly with 'shift_shiftvector' (HANDOFF.md 8.7).
+                ! GeS with the full 27-band window it disagrees strongly with 'shift_shiftvector'.
                 ! Sum-rule form using generalised derivative
                 shift1 = -complex(0.0d0, 1.0d0) / (e_nband(nn) - e_nband(nnp)) * &
                            vme_nband(njp,  nn, nnp) * gen_der_nband(njpp, nj, nnp, nn)
@@ -366,8 +886,8 @@ end subroutine get_sigma_shift_sp
                 ! g_c = d_a ln rho_c = d_a|v^c_{nn'}| / |v^c_{nn'}| - (v^a_nn - v^a_n'n')/w_{nn'}, and only needs the
                 ! derivative of the MODULUS of v, which is gauge invariant (the derivative of the complex v is
                 ! corrupted by gauge jumps between separately diagonalised k-points; the shift vector above
-                ! keeps the clipping it always had). The term is dropped where |v^c| ~ 0 (phase undefined) and,
-                ! like the shift vector, where |g| > 50 bohr (near-degenerate bands).
+                ! keeps the clipping it always had). The term is dropped where |v^c| ~ 0 (phase undefined) and
+                ! where either band is degenerate within eps_deg. NOT on |g|: see the guard below.
                 shift = -(shift_vector_nband(nj, njp,  nnp, nn) - &
                            shift_vector_nband(nj, njpp, nn,  nnp)) * &
                          vme_nband(njpp, nn, nnp) * vme_nband(njp, nnp, nn) / &
@@ -382,10 +902,15 @@ end subroutine get_sigma_shift_sp
                 if (abs(vme_nband(njpp, nn, nnp)) > amp_tiny) gc = vme_abs_der_nband(nj, njpp, nn, nnp) / &
                       abs(vme_nband(njpp, nn, nnp)) - dble(vme_nband(nj, nn, nn) - vme_nband(nj, nnp, nnp)) / dw
                 ! Essential/accidental degeneracies (e.g. the zone boundary of a non-symmorphic lattice) make the
-                ! finite-difference derivatives garbage (|g| ~ 1e4-1e5). The whole pair (both b and c halves of the
-                ! term) is then dropped, like the shift vector is zeroed by clip_threshold in ome_sp.f90; keeping
-                ! only one half would leave an uncancelled remainder.
-                if (abs(gb) > g_clip .or. abs(gc) > g_clip .or. degen(nn) .or. degen(nnp)) then
+                ! finite-difference derivatives garbage. The whole pair (both b and c halves of the term) is then
+                ! dropped; keeping only one half would leave an uncancelled remainder.
+                ! CHANGED 2026-10-05: there used to be a second condition, |g| > 50 bohr. It was the
+                ! wrong kind of guard: g = d_a ln|r| legitimately diverges wherever |r^c| -> 0, while the quantity that
+                ! enters, rho_b rho_c g_c = rho_b d_a rho_c, stays finite -- so the cut discarded real weight. It was
+                ! the MoS2 "b != c weakness": on the degeneracy-lifted model vs an exact reference C3 8.2% -> 3.2% and
+                ! yxy/xxx -0.86 -> -0.95 without it; real MoS2 11.9% -> 9.2% (90x90); hBN unchanged; GeS neutral.
+                ! The degeneracy cut must stay (dropping it at the exact Gamma-M degeneracies of MoS2: C3 27%).
+                if (degen(nn) .or. degen(nnp)) then
                   gb = 0.0d0
                   gc = 0.0d0
                 end if
@@ -476,10 +1001,10 @@ end subroutine get_shift_intens_sp
 ! (p^alpha_mn);k^beta is the gauge-fixed (parallel-transported) generalized derivative computed in
 ! get_berry_eigen_fourpoint (ome_sp.f90) and read here as vme_der_pt_ex_band -- NOT gen_der_ex_band, the
 ! sum-rule form used by shift_sumrule: that form gives an unreliable, near-zero result on small band
-! windows (verified independently this session: an independent NumPy implementation of a SECOND,
+! windows (verified independently: an independent NumPy implementation of a SECOND,
 ! differently-derived SHG formula, Rashkeev/Lambrecht/Segall based on Aversa & Sipe, shows the SAME
 ! near-zero pathology when its generalized derivative is evaluated via the sum rule instead of a direct
-! k-derivative -- see HANDOFF.md). C_ee = C_ie = 1/4 in these units (e=hbar=m=1; spin factor g dropped, as
+! k-derivative). C_ee = C_ie = 1/4 in these units (e=hbar=m=1; spin factor g dropped, as
 ! elsewhere in opticx), combined with the code's usual 1/(Nk*V) discretisation of the BZ sum (paper Eq. A4
 ! and the Sigma_k -> A/(2pi)^D convention below it). Validated against an independent NumPy evaluation of
 ! this same equation (tools/ipa_shg_numpy.py) and cross-checked against a second, independently-derived
@@ -520,10 +1045,10 @@ end subroutine get_shift_intens_sp
     allocate(hwp(nw), hwsum(nw))
     call initialize_sigma_second_arrays(nw, wp, eta2, sigma_w_sp)
 
-    ! SHG is the omega_q = omega_p branch of the general kernel (HANDOFF 8.36). Both frequencies carry
-    ! +i*eta, so the outer pole is 2*omega + 2i*eta -- the paper's convention, and the one CLAUDE.md
-    ! records as required for method A == method B ("build omega_2 as the SUM of the two complex
-    ! frequencies, never as an independent single eta").
+    ! SHG is the omega_q = omega_p branch of the general kernel. Both frequencies carry
+    ! +i*eta, so the outer pole is 2*omega + 2i*eta -- the paper's convention, and the one required for
+    ! method A == method B of Taghizadeh & Pedersen 2018: omega_2 is the SUM of the two complex
+    ! frequencies, never an independent frequency with a single eta.
     do iw = 1, nw
       hwp(iw)   = cmplx(wp(iw), eta2, 8)
       hwsum(iw) = hwp(iw) + hwp(iw)
@@ -574,6 +1099,10 @@ end subroutine get_shift_intens_sp
     end do
     deallocate(sigma_raw)
 
+    ! UNIFIED CONVENTION AND SIGN: Eq. (A3a) is written for J(2) = sum sigma E E (Taghizadeh 2017) and
+    ! its prefactor already contains the electron charge; opticx-wide outputs use J(2) = 1/4 sum sigma E E (2018 /
+    ! npj) and sigma2_au_to_si applies e^3 = -1. Hence x 4 and x (-1). Checked against a real-time propagation of hBN.
+    sigma_w_sp = -4.0d0*sigma_w_sp
     call print_shg_second_sp(nw, wp, sigma_w_sp)
     write(*,*) '    SHG susceptibility (sp) has been printed'
 
@@ -582,7 +1111,7 @@ end subroutine get_shift_intens_sp
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! GENERAL second-order single-particle conductivity sigma^{abc}(w_p + w_q; w_p, w_q), Taghizadeh 2017
-! Eq. (A3a) for a cold intrinsic semiconductor. Added 2026-09-24 (HANDOFF 8.36).
+! Eq. (A3a) for a cold intrinsic semiconductor. Added 2026-09-24.
 !
 ! Frequency pairs POSITIONALLY with the Cartesian index: alpha <-> w_p, beta <-> w_q (Eq. 9a at first
 ! order; term 3's d f_nm/(hbar w_p d k^alpha); the third-order g^gamma <-> w_s). Eq. (A3a) is therefore
@@ -594,8 +1123,8 @@ end subroutine get_shift_intens_sp
 ! Implemented as two passes of the same kernel over the BZ sharing one hwsum: pass 1 with hwp = hbar*wp,
 ! pass 2 with hwp = hbar*wq, then the index transpose on pass 2. For w_p = w_q (SHG) the two passes are
 ! identical and the average degenerates to the plain b<->c swap the old SHG driver did. Every frequency
-! carries +i*eta, hence hwsum = hbar(wp+wq) + 2i*eta (paper convention; HANDOFF 8.36 records why the DC
-! shift code's "eta only on w_p" rule does NOT transfer to Eq. A3a).
+! carries +i*eta, hence hwsum = hbar(wp+wq) + 2i*eta (paper convention; the excitonic DC shift code's
+! "eta only on w_p" rule does NOT transfer to Eq. A3a, whose n = m term is singular at hwsum = 0).
   subroutine get_sigma_general_sp(npointstotal, nband_ex, vme_ex_band, ek, vme_der_pt_ex_band, tag)
     implicit none
     integer,    intent(in) :: nband_ex, npointstotal
@@ -640,10 +1169,11 @@ end subroutine get_shift_intens_sp
     end if
 
     ! Every frequency carries +i*eta, so hwsum = hbar(w_p + w_q) + 2i*eta. The 2i*eta is NOT optional
-    ! and is not "killed by the signs" at w_q = -w_p: term 1 of Eq. (A3a) ALLOWS n = m (CLAUDE.md is
-    ! emphatic -- dropping it broke C3 by 80%), and there E_mn = 0, so the outer denominator is
+    ! and is not "killed by the signs" at w_q = -w_p: term 1 of Eq. (A3a) ALLOWS n = m (its sum carries
+    ! n /= l /= m, not the cyclic condition of Eq. A3b; on two-band models of lower symmetry, e.g. buckled
+    ! hBN, the n = m piece is 44% of the tensor, all of it in the injection channel), and there E_mn = 0, so the outer denominator is
     ! hbar*w_sum - E_mn = hbar*w_sum. Setting w_sum = 0 exactly makes that 0/0: verified, it produces
-    ! NaN at 300 of 300 frequencies (HANDOFF 8.36). The +2i*eta is what regularises it.
+    ! NaN at 300 of 300 frequencies. The +2i*eta is what regularises it.
     do idx = 1, nfreq
       hwp(idx)   = cmplx(wpg(idx), eta2, 8)
       hwq(idx)   = cmplx(wqg(idx), eta2, 8)
@@ -679,6 +1209,7 @@ end subroutine get_shift_intens_sp
         end do
       end do
     end do
+    sigS = -4.0d0*sigS          ! 2017 -> 2018 convention (x4) and physical sign (x -1): see get_sigma_shg_sp
 
     call print_second_general_sp(nfreq, wpg, wqg, sigS, tag)
     deallocate(hwp, hwq, hwsum, wpg, wqg, sigA, sigB, sigS)
@@ -752,7 +1283,7 @@ end subroutine get_shift_intens_sp
   end subroutine print_second_general_sp
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  ! GENERALISED 2026-09-24 to arbitrary (omega_p, omega_q); see HANDOFF 8.36.
+  ! GENERALISED 2026-09-24 to arbitrary (omega_p, omega_q); see.
   ! Taghizadeh 2017 Eq. (A3a) is written for arbitrary frequencies. Specialised to a cold intrinsic
   ! semiconductor only two of its four terms survive, and in BOTH of them omega_q appears ONLY through the
   ! sum omega_p + omega_q:
@@ -766,7 +1297,7 @@ end subroutine get_shift_intens_sp
   ! So this kernel needs exactly TWO complex frequencies per grid point:
   !    hwp(iw)   = hbar*omega_p + i*eta          -> enters g^alpha only
   !    hwsum(iw) = hbar*(omega_p+omega_q) + 2i*eta -> the outer pole only
-  ! Every second-order process is one branch (HANDOFF 8.36):
+  ! Every second-order process is one branch:
   !    SHG (2w;w,w)             hwp = w+ie,  hwsum = 2w+2ie
   !    electro-optic (w;w,0)    hwp = w+ie,  hwsum =  w+2ie
   !    rectification (0;w,-w)   hwp = w+ie,  hwsum =  0+2ie
@@ -891,7 +1422,7 @@ end subroutine get_shift_intens_sp
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     ! Serial on purpose (audit 2026-09-24): both loops are O(nw) of trivial memory traffic, run once
-    ! per calculation. Spawning a thread team costs more than the work itself. HANDOFF 8.35.
+    ! per calculation. Spawning a thread team costs more than the work itself..
     do i = 1, nw
       wp(i)      = 0.0d0
       sigma_w(:,:,:,i) = (0.0d0, 0.0d0)
@@ -933,7 +1464,7 @@ end subroutine get_shift_intens_sp
     ! Ordered writes preserve frequency ordering in the output files.
     ! serial on purpose (audit 2026-09-24): this loop is pure file I/O and every iteration was
     ! inside !$omp ordered, which serialises it completely -- the parallel wrapper only added
-    ! thread spawn and synchronisation cost. HANDOFF 8.35.
+    ! thread spawn and synchronisation cost..
     do iw = 1, nw
 
       write(iounit90,*) wp(iw)*27.211385d0, &
@@ -969,7 +1500,7 @@ end subroutine get_shift_intens_sp
   ! shg_sp_lengthgauge_<material>.dat. Columns: hbar*omega (eV) -- the FUNDAMENTAL (driving) photon energy,
   ! then for a=x,y,z; b=x,y,z; c=x,y,z
   ! (c fastest): Re, Im. Units: uA*nm/V^2, same a.u.->SI factor as the shift/excitonic-SHG conductivities.
-  ! AXIS CONVENTION CHANGED 2026-09-24 (HANDOFF 8.33): column 1 used to be 2*hbar*omega. It is now
+  ! AXIS CONVENTION CHANGED 2026-09-24: column 1 used to be 2*hbar*omega. It is now
   ! hbar*omega, matching every other spectrum opticx writes (sigma_first_sp/ex, the shift conductivity),
   ! so that a two-photon resonance of an excitation at energy E appears at hbar*omega = E/2 and a
   ! one-photon resonance at hbar*omega = E. Files produced before this date carry the old 2*hbar*omega

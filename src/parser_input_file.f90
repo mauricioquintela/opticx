@@ -7,7 +7,7 @@ module parser_input_file
   public :: iflag_ome_sp_text
   public :: iflag_ome_ex_text
   public :: response_text
-  ! Second-order two-frequency control (2026-09-24, HANDOFF 8.36).
+  ! Second-order two-frequency control (2026-09-24).
   ! sigma^{abc}(w_p + w_q; w_p, w_q). Two ways to say what w_q is:
   !   Frequency_ratio r      -> w_q = r * w_p, scanning w_p over Energy_variables.
   !                             r = 1 is SHG, r = 0 electro-optic, r = -1 optical rectification.
@@ -15,6 +15,8 @@ module parser_input_file
   !                             2D (w_p, w_q) map and overrides Frequency_ratio.
   public :: freq_ratio, e1b, e2b, nwb, two_freq_grid
   public :: cache_ome_read, cache_ome_write
+  public :: xnm_covariant, basis_repair
+  public :: sp_covariant
   public :: build_freq_pairs
   public :: iflag_xatu
   public :: iflag_ome_sp
@@ -27,6 +29,10 @@ module parser_input_file
   public :: broadening_type_text
   public :: iflag_write_exk
   public :: read_line_numbers_int !subroutine
+  public :: iflag_orthonormal_text
+  public :: iflag_orthonormal
+  public :: kpath_nv, kpath_frac, kpath_count, kpath_labels, kpath_has_labels
+  public :: second_order_response
 
   character(len=1000) :: material_name_in
   character(len=100) :: filename_input
@@ -38,14 +44,49 @@ module parser_input_file
   character(len=1000) :: xatu_eigval_filepath_in
   character(len=1000) :: xatu_states_filepath_in
   character(len=100) :: response_text
+  character(len=100) :: iflag_orthonormal_text
+  ! Band-structure path (Kpath): vertices in reduced coordinates along the reciprocal lattice vectors and,
+  ! for each, the number of points to the next vertex (1 = this vertex alone, then a jump; the last vertex
+  ! carries 1 to be included). kpath_nv = 0: no path given, bands.f90 uses its default for the lattice.
+  integer :: kpath_nv = 0
+  real(8), allocatable :: kpath_frac(:,:)
+  integer, allocatable :: kpath_count(:)
+  character(len=16), allocatable :: kpath_labels(:)
+  logical :: kpath_has_labels = .false.
   real(8) :: freq_ratio = 1.0d0
-  ! Opt-in cache of the second-order excitonic OMEs (HANDOFF 8.44). Both default .false.: the cache
+  ! Opt-in cache of the second-order excitonic OMEs. Both default .false.: the cache
   ! header fingerprints the exciton solution but NOT the Wannier90 model, so reuse is a choice.
   ! Read and write are INDEPENDENT -- a large run may be worth reading back but too big to store
   ! (the payload is 6*N^2 complex(8): 338 MB at N = 1875, 3.0 GB at N = 5625, 9.6 GB at N = 10000).
   logical :: cache_ome_read  = .false.
   logical :: cache_ome_write = .false.
   character(len=100) :: cache_ome_ex_text = 'false'
+  ! How the intraband part of the inter-exciton position X_nm is evaluated.
+  !   covariant          (default) discrete covariant derivative of the exciton envelopes, transported
+  !                      between grid neighbours with the window overlap matrices <u_n(k)|u_m(k+b)>;
+  !                      invariant under any per-k unitary rotation of the window bands.
+  !   finite_difference  the original form: plain central difference of the envelopes plus the
+  !                      Berry-connection diagonal and r_nm = -i v_nm/(E_n-E_m) inside the window.
+  !                      Correct only where the band gauge is smooth between grid neighbours.
+  logical :: xnm_covariant = .true.
+  ! Repair of the exciton-envelope basis at k-points where window bands are EXACTLY degenerate
+  !. Xatu writes the envelopes in whatever basis its diagonaliser picked inside a
+  ! degenerate block, which opticx cannot know; the repair chooses, per block, the unitary that makes
+  ! the envelopes consistent with their covariantly transported neighbours (needs Xnm_derivative =
+  ! covariant, second order). Keyword Exciton_basis_repair = true | false.
+  logical :: basis_repair = .true.
+  ! Ex_rectification: OBSOLETE. The excitonic rectification is always the whole causal sigma(0; w, -w); the
+  ! shift current in the convention of npj Comput. Mater. 11, 13 is Response = shift. 'causal' is accepted
+  ! with a note, 'shift' stops (it would otherwise silently return a different quantity).
+  character(len=100) :: ex_rect_text = 'causal'
+  character(len=100) :: basis_repair_text = 'true'
+  character(len=100) :: xnm_derivative_text = 'covariant'
+  ! Single-particle second-order method, keyword Sp_method = covariant | per_band. covariant (DEFAULT):
+  ! block-covariant generalised derivative, no degeneracy cut -- Response = shift -> shift_covariant, and shg,
+  ! electrooptic, rectification, general use the covariant method-B kernel. per_band: the older per-band routes
+  ! (shift -> shift_shiftvector; Taghizadeh 2017 Eq. A3a for the others), kept for comparison.
+  logical :: sp_covariant = .true.
+  character(len=100) :: sp_method_text = 'covariant'
   real(8) :: e1b = 0.0d0, e2b = 0.0d0
   integer :: nwb = 0
   logical :: two_freq_grid = .false.
@@ -53,6 +94,7 @@ module parser_input_file
   logical :: iflag_xatu
   logical :: iflag_ome_sp
   logical :: iflag_ome_ex
+  logical :: iflag_orthonormal = .true.   ! default for any caller that does not parse an input file
   logical :: iflag_write_exk
 
   integer :: ndim
@@ -66,6 +108,17 @@ module parser_input_file
   allocatable :: nband_index(:)
 
   contains
+  !> True for the Response values evaluated by the second-order routines (optical_response::second_order).
+  logical function second_order_response()
+    select case (trim(response_text))
+      case ('shift_sumrule', 'shift_shiftvector', 'shift_gender', 'shift_covariant', 'shg', 'shg_covariant', &
+            'electrooptic', 'rectification', 'general')
+        second_order_response = .true.
+      case default
+        second_order_response = .false.
+    end select
+  end function second_order_response
+
     function to_lower(str) result(lower_str)
       implicit none
       character(len=*), intent(in) :: str
@@ -91,7 +144,7 @@ module parser_input_file
       character(len=100) :: param_name
       logical :: ndim_found, material_found, xatu_found, bandlist_found
       logical :: ncells_found, nfermi_found, ome_sp_found, ome_ex_found
-      logical :: response_found, energy_found, exciton_found
+      logical :: response_found, energy_found, exciton_found, iflag_orthonormal_found
       logical :: write_exk_found   ! PATCH: was declared-but-unused in a comment
       
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -110,6 +163,8 @@ module parser_input_file
       response_found = .false.
       energy_found = .false.
       exciton_found = .false.
+      norb_ex_cut = 0               ! Exciton_cutoff absent: every exciton in the Xatu files (get_exciton_dim)
+      iflag_orthonormal_found = .false.
       write_exk_found = .false.
       ! default broadening
       !broadening_type_text = 'gaussian'
@@ -152,16 +207,26 @@ module parser_input_file
               iflag_xatu = .false.
             else
               write(*,*) 'Error: Invalid value in Xatu_interface. Expected "true" or "false".'
-              stop
+              stop 1
             end if
             
           else if (index(param_name, 'Exciton_cutoff') > 0) then
             read(iounit10,*) norb_ex_cut
             exciton_found = .true.
+            if (norb_ex_cut < 0) then
+              write(*,*) 'Error: Exciton_cutoff must be positive (omit it to use every exciton in the Xatu files).'
+              stop 1
+            end if
             
           else if (index(param_name, 'Bandlist') > 0) then
             call read_line_numbers_int(iounit10, narray, num_values)
             bandlist_found = .true.
+
+          else if (index(param_name, 'Kpath_labels') > 0) then
+            call read_kpath_labels(iounit10)
+
+          else if (index(param_name, 'Kpath') > 0) then
+            call read_kpath(iounit10)
             
           else if (index(param_name, 'Ncells') > 0) then
             read(iounit10,*) npointstotal_sq
@@ -174,6 +239,10 @@ module parser_input_file
           else if (index(param_name, 'OME_sp') > 0 .or. index(param_name, 'OME_SP') > 0) then
             read(iounit10,*) iflag_ome_sp_text
             ome_sp_found = .true.
+            
+          else if (index(param_name, 'Orthonormal') > 0) then
+            read(iounit10,*) iflag_orthonormal_text   ! iounit10 (newunit): unit 10 is not connected
+            iflag_orthonormal_found = .true. 
             
           else if (index(param_name, 'OME_ex') > 0 .or. index(param_name, 'OME_EX') > 0) then
             read(iounit10,*) iflag_ome_ex_text
@@ -206,6 +275,63 @@ module parser_input_file
                 write(*,*) 'ERROR (parser_input_file): Cache_ome_ex = "'// &
                            trim(cache_ome_ex_text)//'" is not recognised.'
                 write(*,*) '       Valid: read, write, readwrite (= true, both), off (= false, none).'
+                stop 1
+            end select
+          else if (index(param_name, 'Ex_rectification') > 0) then
+            read(iounit10,'(A)') ex_rect_text
+            ex_rect_text = to_lower(adjustl(ex_rect_text))
+            select case (trim(ex_rect_text))
+              case ('causal')
+                write(*,*) 'NOTE (parser_input_file): Ex_rectification is obsolete; the excitonic rectification'
+                write(*,*) '     is always the causal sigma(0; w, -w). The keyword is ignored.'
+              case ('shift')
+                write(*,*) 'ERROR (parser_input_file): Ex_rectification = shift has been removed. The excitonic'
+                write(*,*) '      rectification is now the whole causal sigma(0; w, -w), injection current included;'
+                write(*,*) '      for the shift current (npj Comput. Mater. 11, 13 convention) use Response = shift.'
+                stop 1
+              case default
+                write(*,*) 'ERROR (parser_input_file): Ex_rectification = "'// &
+                           trim(ex_rect_text)//'" is not recognised (and the keyword is obsolete).'
+                stop 1
+            end select
+          else if (index(param_name, 'Exciton_basis_repair') > 0) then
+            read(iounit10,'(A)') basis_repair_text
+            basis_repair_text = to_lower(adjustl(basis_repair_text))
+            select case (trim(basis_repair_text))
+              case ('true', '.true.', 'on', 'yes')
+                basis_repair = .true.
+              case ('false', '.false.', 'off', 'no')
+                basis_repair = .false.
+              case default
+                write(*,*) 'ERROR (parser_input_file): Exciton_basis_repair = "'// &
+                           trim(basis_repair_text)//'" is not recognised. Valid: true, false.'
+                stop 1
+            end select
+          else if (index(param_name, 'Xnm_derivative') > 0) then
+            read(iounit10,'(A)') xnm_derivative_text
+            xnm_derivative_text = to_lower(adjustl(xnm_derivative_text))
+            select case (trim(xnm_derivative_text))
+              case ('covariant')
+                xnm_covariant = .true.
+              case ('finite_difference', 'plain')
+                xnm_covariant = .false.
+              case default
+                write(*,*) 'ERROR (parser_input_file): Xnm_derivative = "'// &
+                           trim(xnm_derivative_text)//'" is not recognised.'
+                write(*,*) '       Valid: covariant (default), finite_difference (= plain).'
+                stop 1
+            end select
+          else if (index(param_name, 'Sp_method') > 0) then
+            read(iounit10,'(A)') sp_method_text
+            sp_method_text = to_lower(adjustl(sp_method_text))
+            select case (trim(sp_method_text))
+              case ('covariant')
+                sp_covariant = .true.
+              case ('per_band')
+                sp_covariant = .false.
+              case default
+                write(*,*) 'ERROR (parser_input_file): Sp_method = "'//trim(sp_method_text)//'" is not recognised.'
+                write(*,*) '       Valid: covariant (default), per_band.'
                 stop 1
             end select
           else if (index(param_name, 'Frequency_ratio') > 0) then
@@ -253,6 +379,18 @@ module parser_input_file
         iflag_ome_ex = .false.
       end if
       
+      
+      if (iflag_orthonormal_found .and. iflag_orthonormal_text == 'false') then
+        iflag_orthonormal = .false.
+      else if (iflag_orthonormal_found .and. iflag_orthonormal_text == 'true') then
+        iflag_orthonormal = .true.
+      else if (iflag_orthonormal_found) then
+              write(*,*) 'ERROR: Invalid value in Orthonormal. Expected "true" or "false".'
+              stop 1
+      else if (.not. iflag_orthonormal_found) then
+        iflag_orthonormal = .true.
+      end if
+      
       if (iflag_write_exk_text == 'true') then
         iflag_write_exk = .true.
       else
@@ -260,8 +398,98 @@ module parser_input_file
       end if
 
       
+      ! Response = shift: the recommended single-particle shift current, chosen by Sp_method.
+      ! The explicit names (shift_covariant, shift_shiftvector, ...) keep selecting exactly what they name;
+      ! shg_covariant always selects the covariant SHG.
+      if (trim(response_text) == 'shift') then
+        if (sp_covariant) then
+          response_text = 'shift_covariant'
+        else
+          response_text = 'shift_shiftvector'
+        end if
+      end if
+      if (trim(response_text) == 'shg_covariant') sp_covariant = .true.
+
       write(*,*) '   Input file has been read'
     end subroutine get_input_file
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    !> Read the Kpath block: one vertex per line, "f1 f2 f3 n" (reduced coordinates along the reciprocal
+    !! lattice vectors, n = number of points from this vertex to the next; n = 1 puts the vertex alone and
+    !! jumps to the next one; the last vertex carries 1 to be included, 0 to be left out). The block ends
+    !! at a blank line, the next '#' line (pushed back) or the end of the file.
+    !! @param iounit  The open input file.
+    !! @return void
+    subroutine read_kpath(iounit)
+    implicit none
+    integer, intent(in) :: iounit
+    integer, parameter :: maxv = 1000
+    real(8) :: f(3, maxv)
+    integer :: n(maxv), ios, nv
+    character(len=1000) :: line
+    nv = 0
+    do
+      read(iounit,'(A)',iostat=ios) line
+      if (ios /= 0) exit
+      line = adjustl(line)
+      if (len_trim(line) == 0) exit
+      if (line(1:1) == '#') then
+        backspace(iounit)
+        exit
+      end if
+      if (nv == maxv) then
+        write(*,*) 'ERROR (parser_input_file): Kpath has more than', maxv, 'vertices.'
+        stop 1
+      end if
+      nv = nv + 1
+      read(line,*,iostat=ios) f(1,nv), f(2,nv), f(3,nv), n(nv)
+      if (ios /= 0) then
+        write(*,*) 'ERROR (parser_input_file): Kpath line "'//trim(line)//'" is not "f1 f2 f3 npoints".'
+        stop 1
+      end if
+    end do
+    if (nv < 2) then
+      write(*,*) 'ERROR (parser_input_file): Kpath needs at least two vertices.'
+      stop 1
+    end if
+    if (any(n(1:nv-1) < 1) .or. n(nv) < 0) then
+      write(*,*) 'ERROR (parser_input_file): Kpath point counts must be >= 1 (1 = jump to the next vertex);'
+      write(*,*) '       the last vertex takes 1 (included) or 0 (left out).'
+      stop 1
+    end if
+    kpath_nv = nv
+    allocate(kpath_frac(3,nv), kpath_count(nv))
+    kpath_frac = f(:,1:nv); kpath_count = n(1:nv)
+    end subroutine read_kpath
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    !> Read the Kpath_labels line: one label per Kpath vertex, separated by spaces (e.g. "G M K G").
+    !! @param iounit  The open input file.
+    !! @return void
+    subroutine read_kpath_labels(iounit)
+    implicit none
+    integer, intent(in) :: iounit
+    character(len=1000) :: line
+    character(len=16) :: tok(1000)
+    integer :: ios, i, nt, istart
+    read(iounit,'(A)',iostat=ios) line
+    if (ios /= 0) return
+    nt = 0; i = 1
+    line = adjustl(line)
+    do while (i <= len_trim(line))
+      if (line(i:i) == ' ') then
+        i = i + 1; cycle
+      end if
+      istart = i
+      do while (i <= len_trim(line))
+        if (line(i:i) == ' ') exit
+        i = i + 1
+      end do
+      nt = nt + 1; tok(nt) = line(istart:i-1)
+    end do
+    if (nt > 0) then
+      if (allocated(kpath_labels)) deallocate(kpath_labels)
+      allocate(kpath_labels(nt)); kpath_labels = tok(1:nt); kpath_has_labels = .true.
+    end if
+    end subroutine read_kpath_labels
     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     !This routine reads a line of numbers into an array
     subroutine read_line_numbers_int(iounit,narray,num_values)
@@ -280,7 +508,7 @@ module parser_input_file
     read(iounit,'(A)', iostat=ios) line
     if (ios /= 0) then
       print *, 'Error reading file'
-    stop
+    stop 1
     end if
 
     ncount=0
@@ -315,7 +543,7 @@ module parser_input_file
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   ! Builds the list of (omega_p, omega_q) pairs for a general second-order run, in Hartree.
-  ! Two modes (HANDOFF 8.36):
+  ! Two modes:
   !   Energy_variables_2 present -> the full 2D grid, nfreq = nw*nwb, omega_p the SLOW index.
   !   otherwise                  -> omega_q = freq_ratio * omega_p over the Energy_variables grid.
   ! Shared by the single-particle and excitonic drivers so the two can never drift apart.

@@ -238,6 +238,82 @@ module exciton_envelopes
 
   end subroutine get_fk_ex_der_k
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  !> Central-difference stencil of the k-mesh, with the SAME geometry as get_fk_ex_der_k (crystal
+  !! direction 1 fastest, periodic neighbours): for each point, the flat index of its +/- neighbour
+  !! along each crystal direction, 1/(2*h) for that direction (0 if inactive, and then the neighbour
+  !! is the point itself), and the exact crystal->Cartesian Jacobian dRkdK(i,a) = d(rk_i)/d(k_a).
+  !! d f/d k_a = sum_i dRkdK(i,a) * inv2h(i) * (f(nbp(i,k)) - f(nbm(i,k))). Used by the covariant
+  !! envelope derivative, which has to transport f before differencing it.
+  subroutine get_kgrid_stencil(nbp, nbm, inv2h, dRkdK)
+    implicit none
+    integer, intent(out) :: nbp(3, npointstotal), nbm(3, npointstotal)
+    real(8), intent(out) :: inv2h(3), dRkdK(3,3)
+    real(8) :: rk1(npointstotal), rk2(npointstotal), rk3(npointstotal)
+    real(8) :: dum1,dum2,dum3,dum4,dum5,dum6, h(3)
+    integer :: ibz, nside, i_fast, i_mid, i_slow, d1, d2
+
+    if (.not. active_flags_set) call set_active_flags()
+    do ibz = 1, npointstotal
+      call get_k_kc(G, rkxvector(ibz), rkyvector(ibz), rkzvector(ibz), rk1(ibz), rk2(ibz), rk3(ibz), &
+                    dum1,dum2,dum3,dum4,dum5,dum6)
+      nbp(:,ibz) = ibz
+      nbm(:,ibz) = ibz
+    end do
+    call get_k_kc(G, 1.0d0,0.0d0,0.0d0, dRkdK(1,1),dRkdK(2,1),dRkdK(3,1), dum1,dum2,dum3,dum4,dum5,dum6)
+    call get_k_kc(G, 0.0d0,1.0d0,0.0d0, dRkdK(1,2),dRkdK(2,2),dRkdK(3,2), dum1,dum2,dum3,dum4,dum5,dum6)
+    call get_k_kc(G, 0.0d0,0.0d0,1.0d0, dRkdK(1,3),dRkdK(2,3),dRkdK(3,3), dum1,dum2,dum3,dum4,dum5,dum6)
+
+    h = 0.0d0
+    if (ndim == 1) then
+      d1 = 1
+      if (active_y) d1 = 2
+      if (active_z) d1 = 3
+      select case (d1)
+        case (1); h(1) = rk1(2) - rk1(1)
+        case (2); h(2) = rk2(2) - rk2(1)
+        case (3); h(3) = rk3(2) - rk3(1)
+      end select
+      do ibz = 1, npointstotal
+        nbp(d1,ibz) = k_neighbor(ibz,1,npointstotal,ibz, 1)
+        nbm(d1,ibz) = k_neighbor(ibz,1,npointstotal,ibz,-1)
+      end do
+    else if (ndim == 2) then
+      nside = nint(sqrt(dble(npointstotal)))
+      if (active_x .and. active_y) then
+        d1 = 1; d2 = 2; h(1) = rk1(2) - rk1(1); h(2) = rk2(nside+1) - rk2(1)
+      else if (active_x .and. active_z) then
+        d1 = 1; d2 = 3; h(1) = rk1(2) - rk1(1); h(3) = rk3(nside+1) - rk3(1)
+      else
+        d1 = 2; d2 = 3; h(2) = rk2(2) - rk2(1); h(3) = rk3(nside+1) - rk3(1)
+      end if
+      do ibz = 1, npointstotal
+        i_fast = mod(ibz-1, nside) + 1
+        i_slow = (ibz-1)/nside + 1
+        nbp(d1,ibz) = k_neighbor(ibz,1,    nside,i_fast, 1)
+        nbm(d1,ibz) = k_neighbor(ibz,1,    nside,i_fast,-1)
+        nbp(d2,ibz) = k_neighbor(ibz,nside,nside,i_slow, 1)
+        nbm(d2,ibz) = k_neighbor(ibz,nside,nside,i_slow,-1)
+      end do
+    else
+      nside = nint(dble(npointstotal)**(1.0d0/3.0d0))
+      h(1) = rk1(2) - rk1(1); h(2) = rk2(nside+1) - rk2(1); h(3) = rk3(nside*nside+1) - rk3(1)
+      do ibz = 1, npointstotal
+        i_fast = mod(ibz-1, nside) + 1
+        i_mid  = mod((ibz-1)/nside, nside) + 1
+        i_slow = (ibz-1)/(nside*nside) + 1
+        nbp(1,ibz) = k_neighbor(ibz,1,          nside,i_fast, 1)
+        nbm(1,ibz) = k_neighbor(ibz,1,          nside,i_fast,-1)
+        nbp(2,ibz) = k_neighbor(ibz,nside,      nside,i_mid,  1)
+        nbm(2,ibz) = k_neighbor(ibz,nside,      nside,i_mid, -1)
+        nbp(3,ibz) = k_neighbor(ibz,nside*nside,nside,i_slow, 1)
+        nbm(3,ibz) = k_neighbor(ibz,nside*nside,nside,i_slow,-1)
+      end do
+    end if
+    inv2h = 0.0d0
+    where (h /= 0.0d0) inv2h = 1.0d0/(2.0d0*h)
+  end subroutine get_kgrid_stencil
+
 
 subroutine interp1(npointstotal, rk1v, rk2v, rk3v, fk_col, rk1, rk2, rk3, result)
   implicit none

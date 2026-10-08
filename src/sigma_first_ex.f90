@@ -90,7 +90,7 @@ module sigma_first_ex
   ! (P/Pi)^2 = 2.34 times too large (3.147 vs 1.345 a.u.; 2.1-2.15 above 6.6 eV; the paper's Fig. 1
   ! shows the same ~2.1x C' vs A-D). The full-omega method B (Eq. 4b) matches the Pi form to 3e-4.
   ! Not switched yet: needs X_n, which is only filled when the nonlinear matrix elements are
-  ! requested (see HANDOFF.md section 8).
+  ! requested.
   subroutine get_kubo_intens_ex(vme_ex,nw,wp,eta1,sigma_w_ex)
     implicit none
     !dimension skubo_ex_int(3,3,norb_ex_cut)
@@ -164,7 +164,7 @@ module sigma_first_ex
     feps=1.0d0 !use atomic units
     ! serial on purpose (audit 2026-09-24): this loop is pure file I/O and every iteration was
     ! inside !$omp ordered, which serialises it completely -- the parallel wrapper only added
-    ! thread spawn and synchronisation cost. HANDOFF 8.35.
+    ! thread spawn and synchronisation cost..
     do iw=1,nw
       write(iounit50,*) wp(iw)*27.211385d0, &
         realpart(feps*sigma_w_ex(1,1,iw)), &

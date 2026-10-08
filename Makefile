@@ -205,7 +205,7 @@ $(BINDIR)/test_second_symmetry: $(OBJ_MODULES) $(BINDIR)/test_second_symmetry.o
 $(BINDIR)/test_second_symmetry.o: tests/test_second_symmetry.f90 | $(BUILDDIR) $(BINDIR)
 	$(FC) -I$(BUILDDIR) -J$(BUILDDIR) -c $< $(FFLAGS) -o $@ $(LIBS)
 
-# Symmetry of the general two-frequency branch at r = w_q/w_p other than 1 (HANDOFF 8.43)
+# Symmetry of the general two-frequency branch at r = w_q/w_p other than 1
 run_test_second_symmetry: $(BINDIR)/test_second_symmetry
 	mkdir -p $(BINDIR)/test_run_sym
 	sed 's|@ROOT@|$(CURDIR)|g' tests/test_second_symmetry.in > $(BINDIR)/test_run_sym/in.txt
@@ -239,11 +239,41 @@ check_sp_shift: $(TARGET)
 check_sp_shg: $(TARGET)
 	python3 tools/check_sp_shg.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_sp_shg
 
-# Cache_ome_ex: the five modes, asserting both behaviour and what the run says about itself (8.44/8.45)
+# Cache_ome_ex: the five modes, asserting both behaviour and what the run says about itself
 check_ome_cache: $(TARGET)
 	python3 tools/check_ome_cache.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_ome_cache
 
-# Eq. (A4) basis guard: OME_sp = none must refuse the excitonic path unless a cache covers it (8.46)
+# Gauge covariance: scrambled eigenvector phases must not move X_nm or any second-order output
+check_gauge_covariance: $(TARGET)
+	python3 tools/check_gauge_covariance.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_gauge_covariance
+
+check_shift_covariant: $(TARGET)
+	python3 tools/check_shift_covariant.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_shift_covariant
+
+check_realtime_sign: $(TARGET)
+	python3 tools/check_realtime_sign.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_realtime_sign
+
+# Excitonic rectification, the whole causal sigma(0; w, -w): NI limit (Re and injection), reality, selection rule, NumPy
+check_ex_rectification: $(TARGET)
+	python3 tools/check_ex_rectification.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_ex_rectification
+
+# Out-of-plane components and the injection sign vs a real-time propagation (non-interacting buckled hBN)
+check_out_of_plane: $(TARGET)
+	python3 tools/check_out_of_plane.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_out_of_plane
+
+# Band structure along a k-path (Kpath input, default path, Response = bands)
+check_bands: $(TARGET)
+	python3 tools/check_bands.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_bands
+
+# Band window: report and warning for an unusual Bandlist (a list of offsets, not a range)
+check_bandlist_guard: $(TARGET)
+	python3 tools/check_bandlist_guard.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_bandlist_guard
+
+# _tb.dat reader: Hermiticity check and repair of H, S and r
+check_tb_hermiticity: $(TARGET)
+	python3 tools/check_tb_hermiticity.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_tb_hermiticity
+
+# Eq. (A4) basis guard: OME_sp = none must refuse the excitonic path unless a cache covers it
 check_a4_basis_guard: $(TARGET)
 	python3 tools/check_a4_basis_guard.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_a4
 

@@ -30,10 +30,10 @@ module optical_response
         call get_sigma_first_sp()
         if (iflag_xatu) call get_sigma_first_ex()
 
-      case ('shift_sumrule', 'shift_shiftvector', 'shift_gender')
+      case ('shift_sumrule', 'shift_shiftvector', 'shift_gender', 'shift_covariant')
         call second_order(1, -1, 'shift conductivity')
 
-      case ('shg')
+      case ('shg', 'shg_covariant')
         call second_order(1, 1, 'shg susceptibility')
 
       case ('electrooptic')
@@ -41,16 +41,16 @@ module optical_response
 
       case ('rectification')
         ! Excitonic branch goes through METHOD A, Eq. (B1a): it has no i*hbar*omega_2 prefactor and
-        ! so stays finite at omega_2 = 0, where method B vanishes identically (HANDOFF 8.38).
-        call second_order(1, 1, 'optical rectification, sigma(0; w, -w) via Eq. (A3a)')
+        ! so stays finite at omega_2 = 0, where method B vanishes identically.
+        call second_order(1, 1, 'optical rectification, sigma(0; w, -w)')
 
       case ('general')
         call second_order(1, 1, 'general second order, sigma(w_p+w_q; w_p, w_q)')
 
       case default
         write(*,*) 'ERROR (optical_response): unknown Response = "'//trim(response_text)//'".'
-        write(*,*) '       Valid: none, absorbance, shift_sumrule, shift_shiftvector, shift_gender,'
-        write(*,*) '              shg, electrooptic, rectification, general.'
+        write(*,*) '       Valid: none, bands, absorbance, shift, shift_covariant, shift_shiftvector, shift_sumrule, shift_gender,'
+        write(*,*) '              shg, shg_covariant, electrooptic, rectification, general.'
         write(*,*) '       Note it is case sensitive. Nothing would have been computed; stopping.'
         stop 1
 

@@ -6,7 +6,7 @@ module parser_optics_xatu_dim
     only:xatu_eigval_filepath_in,xatu_states_filepath_in, & !filepaths
       ndim,npointstotal_sq, & !variables
       iflag_xatu,nf,nband_index,norb_ex_cut, & 
-      cache_ome_read,iflag_ome_ex_text,iflag_write_exk, & !for the fk_ex deferral, below
+      cache_ome_read,iflag_ome_ex_text,iflag_write_exk,second_order_response, & !for the fk_ex deferral, below
       read_line_numbers_int !subroutine
   implicit none
 
@@ -28,7 +28,7 @@ module parser_optics_xatu_dim
   ! either ome_sp carried it into the Eq. (A4) rotated basis (rotate_fk_ex_to_a4_basis), or that
   ! rotation is switched off and there is nothing to carry. Anything that consumes fk_ex must refuse
   ! to run while this is .false., because the answer is then wrong by O(1) and not by a little
-  ! (HANDOFF 8.46). It lives here, next to fk_ex, so that ome_sp (which sets it) and ome_ex (which
+  !. It lives here, next to fk_ex, so that ome_sp (which sets it) and ome_ex (which
   ! checks it) share it without either module having to use the other.
   logical :: fk_ex_basis_ok = .false.
 
@@ -82,6 +82,8 @@ subroutine get_optics_xatu_dim()
   end do
   nc_ex=nband_ex-nv_ex
 
+  call check_band_window(nband_index)
+
   !change syntax for band counting
   !XATU: ...-1 0 1 2... to explicit band count
   !opticx: ...nf-1,nf,nf+1...
@@ -122,6 +124,52 @@ subroutine get_optics_xatu_dim()
   write(*,*) "   Grid and band parameters have been set"
   
 end subroutine get_optics_xatu_dim   
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!> Report the band window and warn about an unusual one. Bandlist is a LIST of offsets from the Fermi
+!! level (0 = top valence, 1 = bottom conduction), not a range: '-1 2' selects two bands, the second
+!! valence and the second conduction band, and skips both frontier bands. Such a window is legal (and the
+!! same check covers the band list read from a Xatu .states file), but it is easy to write by mistake and
+!! it cuts degenerate pairs: on MoS2 it produced a symmetry-violating rectification background 30 to 500
+!! times the shift current. Warn when the window omits offset 0 or 1, has gaps, or repeats an offset.
+!! @param off  Band offsets relative to the Fermi level, before the Nfermi shift.
+!! @return void
+subroutine check_band_window(off)
+  implicit none
+  integer, intent(in) :: off(:)
+  integer :: k, n, lo, hi
+  character(len=1024) :: line, miss
+  logical :: has0, has1, dup
+
+  n = size(off)
+  write(line,'(a)') '    Band window (offset from Nfermi -> band):'
+  do k = 1, n
+    write(line,'(a,1x,i0,a,i0)') trim(line), off(k), '->', off(k) + nf
+  end do
+  write(*,'(a)') trim(line)
+
+  has0 = any(off == 0); has1 = any(off == 1)
+  dup = .false.
+  do k = 1, n
+    if (count(off == off(k)) > 1) dup = .true.
+  end do
+  miss = ''
+  lo = minval(off); hi = maxval(off)
+  do k = min(lo, 0), max(hi, 1)
+    if (k <= 0 .and. k < lo) cycle
+    if (k >= 1 .and. k > hi) cycle
+    if (.not. any(off == k)) write(miss,'(a,1x,i0)') trim(miss), k
+  end do
+  if ((.not. has0) .or. (.not. has1) .or. len_trim(miss) > 0 .or. dup) then
+    write(*,'(a)') '    WARNING (Bandlist): unusual band window. Bandlist is a LIST of offsets from the Fermi level'
+    write(*,'(a)') '             (0 = top valence band, 1 = bottom conduction band), not a range.'
+    if (.not. has0) write(*,'(a)') '             The top valence band (offset 0) is not included.'
+    if (.not. has1) write(*,'(a)') '             The bottom conduction band (offset 1) is not included.'
+    if (len_trim(miss) > 0) write(*,'(a)') '             Offsets missing between the window edges:'//trim(miss)
+    if (dup) write(*,'(a)') '             An offset is listed more than once.'
+    write(*,'(a)') '             A window that skips bands can cut degenerate pairs. Write every band out, e.g. -1 0 1 2.'
+  end if
+end subroutine check_band_window
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!    
 ! This subroutine prints a part of the exciton wavefunction or 
@@ -311,6 +359,23 @@ subroutine get_exciton_dim()
   end if
   norb_ex = norb_ex_band * npointstotal
 
+  ! Exciton_cutoff absent (or 0): use every exciton Xatu wrote. Its .eigval header is the cell count, the
+  ! exciton basis size and the number of excitons in the file (Result::writeEigenvalues); the .states header
+  ! is the basis size, not the exciton count, so the count is taken from the .eigval.
+  if (norb_ex_cut <= 0) then
+    open(newunit=iounit_nk,file=trim(xatu_eigval_filepath_in))
+    read(iounit_nk,*,iostat=ios)
+    if (ios == 0) read(iounit_nk,*,iostat=ios)
+    if (ios == 0) read(iounit_nk,*,iostat=ios) norb_ex_cut
+    close(iounit_nk)
+    if (ios /= 0 .or. norb_ex_cut <= 0) then
+      write(*,*) 'ERROR (get_exciton_dim): Exciton_cutoff is not given and the number of excitons could not be'
+      write(*,*) '       read from the third line of ', trim(xatu_eigval_filepath_in), '. Set Exciton_cutoff.'
+      stop 1
+    end if
+    write(*,'(a,i0,a)') '    Exciton_cutoff not given: using all ', norb_ex_cut, ' excitons in the Xatu files'
+  end if
+
 end subroutine get_exciton_dim
 	  
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -475,7 +540,9 @@ subroutine get_exciton_data()
   ! cache read may make them unnecessary; in that case load_fk_ex() is called later, by get_ome_ex, if
   ! and only if the cache misses. The predicate is deliberately coarse -- it asks whether a hit is
   ! POSSIBLE, not whether it will happen -- because a wrong guess costs only the same read, later.
-  if (.not. (cache_ome_read .and. iflag_ome_ex_text == 'nonlinear' .and. .not. iflag_write_exk)) then
+  ! OME_ex = none on a second-order run takes everything from the cache (a miss stops), so it never needs them.
+  if (.not. (cache_ome_read .and. .not. iflag_write_exk .and. (iflag_ome_ex_text == 'nonlinear' .or. &
+             (iflag_ome_ex_text == 'none' .and. second_order_response())))) then
     call load_fk_ex()
   else
     write(*,*) '   Exciton envelopes not read yet: a second-order cache may make them unnecessary'

@@ -1,0 +1,6 @@
+build/
+bin/
+build.log
+tools/__pycache__/
+tools/refs/
+tools/shg_generic_check.py

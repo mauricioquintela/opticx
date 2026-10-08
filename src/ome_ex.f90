@@ -1,7 +1,8 @@
 module ome_ex
   use constants_math
   use parser_input_file, &
-    only: nf, e1, e2, eta, nw, iflag_write_exk, cache_ome_read, cache_ome_write
+    only: nf, e1, e2, eta, nw, iflag_write_exk, cache_ome_read, cache_ome_write, xnm_covariant, &
+          basis_repair
   use parser_wannier90_tb, &
     only: material_name, norb
   use parser_optics_xatu_dim, &
@@ -11,16 +12,16 @@ module ome_ex
           get_ex_index_first, print_exciton_wf, &
           rkxvector, rkyvector, rkzvector
   use exciton_envelopes, &
-    only: fk_ex_der, get_fk_ex_der_k
+    only: fk_ex_der, get_fk_ex_der_k, get_kgrid_stencil
   use ome_sp, &
-    only: rotate_fk_ex_to_a4_basis
+    only: rotate_fk_ex_to_a4_basis, win_evec, win_sevec, win_xi2, win_ready, OMESP_TAG
   implicit none
   logical, save :: inter_terms_ready = .false.
 !   public :: inter_terms_ready
 
   complex(8), allocatable :: xme_ex(:,:)
   complex(8), allocatable :: vme_ex(:,:)
-  ! HANDOFF 8.45: qme_ex_inter1/2, qme_ex_inter, yme_ex_inter1/2, yme_ex_inter and vme_ex_inter1/2
+  ! qme_ex_inter1/2, qme_ex_inter, yme_ex_inter1/2, yme_ex_inter and vme_ex_inter1/2
   ! used to exist as eight separate (3,N,N) arrays, plus six THREAD-PRIVATE copies of them inside the
   ! parallel k-loop. Nothing ever read them individually -- they were summed at the end into
   ! xme_ex_inter = (yme1+yme2)+(qme1+qme2) and vme_ex_inter = vme1+vme2 -- so the six accumulation
@@ -107,7 +108,7 @@ contains
     ! xme_ex_band allocated and zeroed UNCONDITIONALLY, not only for
     ! iflag_norder==2: get_ome_gs_ex_sum_k reads it on every call
     ! regardless of iflag_norder, with no guard of its own -- for
-    ! SECOND-ORDER OME CACHE (HANDOFF 8.44). A hit skips the whole k-loop below, which on hBN_N75
+    ! SECOND-ORDER OME CACHE. A hit skips the whole k-loop below, which on hBN_N75
     ! with norb_ex_cut = 1875 measured 1300 s and a 43 GB peak -- the peak being the six thread-private
     ! (3,N,N) inter-exciton accumulators, ~1 GB per thread across 32 threads. read_ome_ex_second fills
     ! xme_ex, vme_ex, xme_ex_inter, vme_ex_inter and sets inter_terms_ready, i.e. everything this
@@ -134,17 +135,17 @@ contains
     ! so rotate_fk_ex_to_a4_basis cannot run and leaves fk_ex in Xatu's basis. The two bases differ
     ! inside every near-degenerate multiplet, and the error is O(1), not small: measured on In2Se3
     ! (4 valence x 1 conduction) it moves the excitonic SHG by 13% of the largest tensor component and
-    ! by more than 100% of several smaller ones (HANDOFF 8.46). It used to be a warning that the run
+    ! by more than 100% of several smaller ones. It used to be a warning that the run
     ! ignored. Note the position: a cache hit returns above, so OME_sp = none REMAINS valid together
     ! with Cache_ome_ex = read, which is the whole point of the cache -- the cached elements were
     ! built in the rotated basis by the run that wrote them.
     if (.not. fk_ex_basis_ok) then
       write(*,*) ' ERROR (ome_ex): the exciton envelopes are not in the same basis as the'
       write(*,*) '        single-particle matrix elements, so no excitonic quantity can be'
-      write(*,*) '        computed. Cause: OME_sp = none does not rebuild the Eq. (A4) rotation'
-      write(*,*) '        matrices (they are not stored in the .omesp file).'
-      write(*,*) '        Fix: set OME_sp = nonlinear (or = linear for OME_ex = linear), or keep'
-      write(*,*) '        OME_sp = none and supply a matching second-order cache with'
+      write(*,*) '        computed. Cause: OME_sp = none, and the .omesp file does not contain'
+      write(*,*) '        the Eq. (A4) rotation (it was written before 2026-10-06).'
+      write(*,*) '        Fix: regenerate the .omesp once with OME_sp = nonlinear (or = linear for'
+      write(*,*) '        OME_ex = linear), or supply a matching second-order cache with'
       write(*,*) '        Cache_ome_ex = read.'
       stop 1
     end if
@@ -168,11 +169,14 @@ contains
       write(*,*) '   Reading optical matrix elements (sp)...'
       ! gen_der_ex_band and shift_vector_ex_band are omitted on purpose: nothing in the excitonic
       ! path reads them, so the reader discards those records instead of filling whole-mesh arrays
-      ! (HANDOFF 8.45). sigma_second_sp still asks for them, and gets them.
+      !. sigma_second_sp still asks for them, and gets them.
       call read_ome_sp_nonlinear(iflag_norder, npointstotal, nband_ex, &
                                   berry_eigen_ex_band = berry_eigen_ex_band, &
                                   vme_ex_band = vme_ex_band, ek = ek)
       call get_ome_sp_xme_ex_band(ek, vme_ex_band, xme_ex_band)
+      ! Before ANY matrix element is built from fk_ex, so X_n, X_nm and P_n all see the repaired basis.
+      call scramble_degenerate_blocks(ek)     ! test hook, no-op unless OPTICX_DEGEN_SCRAMBLE is set
+      if (basis_repair .and. xnm_covariant) call repair_degenerate_basis(ek)
     end if
 
     allocate(vme_ex(3, norb_ex_cut))
@@ -193,8 +197,19 @@ contains
       xme_ex_inter = (0.0d0, 0.0d0)
       vme_ex_inter = (0.0d0, 0.0d0)
 
-      allocate(fk_ex_der(3, norb_ex, norb_ex_cut))
-      call get_fk_ex_der_k()
+      ! The plain finite-difference envelope derivative is only needed by Xnm_derivative =
+      ! finite_difference; the covariant form (default) transports and differences the
+      ! envelopes itself, so this (3 x norb_ex x N) array is not allocated at all in that mode.
+      if (.not. xnm_covariant) then
+        allocate(fk_ex_der(3, norb_ex, norb_ex_cut))
+        call get_fk_ex_der_k()
+      else if (.not. win_ready) then
+        write(*,*) ' ERROR (ome_ex): Xnm_derivative = covariant needs the exciton-window eigenvectors,'
+        write(*,*) '        which OME_sp = nonlinear computes and stores in the .omesp (files written'
+        write(*,*) '        before 2026-10-06 lack them). Regenerate the .omesp with OME_sp = nonlinear,'
+        write(*,*) '        or use Xnm_derivative = finite_difference.'
+        stop 1
+      end if
 
       nbasis = nc_ex * nv_ex
       ! PATCH: i_ex_table, F_cv, FcvH, D_c, A_c, B_cc, Y_cc, B_vv, Y_vv,
@@ -224,7 +239,7 @@ contains
     kmoment = -1
     
     ! DEFAULT(NONE) added 2026-09-24 (audit): an unlisted variable would silently become SHARED,
-    ! which is how the Wfull/Wblk_chk race reached production earlier this session. See HANDOFF 8.35.
+    ! which is how a data race on the Wfull/Wblk_chk scratch arrays once reached production.
     !$omp parallel default(none) &
     !$omp   private(ibz, ic, iv, vme_ex_t, xme_ex_t, vme_ex_k_t, i_ex_table)&
     ! read-only inputs:
@@ -251,14 +266,14 @@ contains
 
     ! No per-thread inter-exciton arrays any more: get_ome_inter_ex_batched does that work after the
     ! loop, with one shared workspace. This is the allocation that used to set the memory ceiling --
-    ! 144*nthreads*N^2 bytes, 31 GB of the 38.8 GB peak of a ReS2/2700 run (HANDOFF 8.51/8.52).
+    ! 144*nthreads*N^2 bytes, 31 GB of the 38.8 GB peak of a ReS2/2700 run.
     
     
     !$omp do schedule(dynamic) ordered
     do ibz = 1, npointstotal
       ! Progress, not a transcript. This used to print once per k-point: on a 3600-point ReS2 run that
-      ! was 7200 of 7242 log lines (99%), which is how the OME_sp = none basis WARNING of 8.46 came to
-      ! be walked past in this project's own logs. It costs nothing in time either way (measured
+      ! was 7200 of 7242 log lines (99%), and a real WARNING (the OME_sp = none basis warning) went
+      ! unnoticed in those logs. It costs nothing in time either way (measured
       ! 58.30 s vs 58.32 s with the line removed entirely), so the only thing at stake is whether a
       ! real message can be seen. Every thread may print; the order is not guaranteed and does not
       ! matter for a progress indicator.
@@ -288,7 +303,7 @@ contains
 
       ! The inter-exciton terms used to be accumulated here, once per k-point, into thread-private
       ! (3,N,N) and (N,N) arrays. That is where this loop's memory went and why it stopped scaling
-      ! (HANDOFF 8.51). They are now done for all k at once by get_ome_inter_ex_batched, after the
+      !. They are now done for all k at once by get_ome_inter_ex_batched, after the
       ! loop; only the cheap ground-state terms above remain per-k.
     end do
     !$omp end do
@@ -313,13 +328,13 @@ contains
     if (iflag_norder == 2) then
       ! The whole k-sum for the inter-exciton terms, as one zgemm per term per direction.
       call get_ome_inter_ex_batched(xme_ex_band, vme_ex_band, berry_eigen_ex_band, nbasis)
-      deallocate(fk_ex_der)
+      if (allocated(fk_ex_der)) deallocate(fk_ex_der)
       inter_terms_ready = .true.   ! ADD here
     end if
 
     write(*,*) '   Optical matrix elements (ex) have been evaluated'
     ! Both messages used to print unconditionally, so a second-order run announced a write that never
-    ! happened -- write_ome_ex_linear only fires for iflag_norder == 1 (HANDOFF 8.44).
+    ! happened -- write_ome_ex_linear only fires for iflag_norder == 1.
     if (iflag_norder == 1) then
       call write_ome_ex_linear(vme_ex)
       write(*,*) '   Optical matrix elements (ex, N->GS) written'
@@ -330,6 +345,282 @@ contains
     if (iflag_norder == 2) deallocate(berry_eigen_ex_band)
 
   end subroutine get_ome_ex
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  !> Basis repair of the exciton envelopes at k-points where window bands are EXACTLY degenerate
+  !!.
+  !!
+  !! Inside a degenerate block LAPACK returns an arbitrary orthonormal basis, and Xatu's and opticx's
+  !! choices need not agree (the Eq. (A4) rotation carries fk_ex from "opticx's pre-A4 basis", which is
+  !! only Xatu's basis where the bands are non-degenerate). So at such a k the envelopes are
+  !! f_true = U_c^H f_read U_v for unknown block-unitary U_c, U_v. They are estimated from smoothness:
+  !! the average Tbar(k) of the covariantly transported neighbours K(k,k') f(k') (same overlaps as
+  !! build_xcov) approximates f(k) to O(h^2), so U maximises sum_n Re Tr[(U_c^H F^n U_v)^H Tbar^n] --
+  !! an orthogonal Procrustes problem in each of U_c (U_v fixed) and U_v (U_c fixed), solved by SVD and
+  !! alternated. All N excitons share one U per k, so a 2x2 block is fixed by thousands of envelopes.
+  !! Gauss-Seidel sweeps, because neighbours along a degenerate line are themselves degenerate.
+  !! Non-degenerate bands are left alone: both codes fix their phase by the same convention.
+  !! @param[in] ek  window band energies (Hartree), to find the degenerate blocks
+  !> TEST HOOK, no-op unless the environment variable OPTICX_DEGEN_SCRAMBLE is set.
+  !! Simulates Xatu having picked a DIFFERENT basis inside every exactly degenerate window block: the
+  !! envelopes there are rotated by a deterministic k-dependent unitary, f -> U_c^H f U_v, while opticx's
+  !! own band basis is left alone. Without the basis repair the results must change; with it they must
+  !! come back to the same answer, because the repair maximises over ALL block unitaries.
+  subroutine scramble_degenerate_blocks(ek)
+    implicit none
+    real(8), intent(in) :: ek(npointstotal, nband_ex)
+    real(8), parameter :: tol_deg = 1.0d-6
+    character(len=16) :: val
+    integer :: vlen, nbasis, kk, i, nd
+    complex(8) :: Uc(nc_ex,nc_ex), Uv(nv_ex,nv_ex)
+    complex(8), allocatable :: F(:,:), G2(:,:)
+    integer :: jc, jcp, jv, jvp
+    call get_environment_variable('OPTICX_DEGEN_SCRAMBLE', val, vlen)
+    if (vlen == 0 .or. trim(val) == '0') return
+    nbasis = nc_ex*nv_ex
+    allocate(F(nbasis, norb_ex_cut), G2(nbasis, norb_ex_cut))
+    nd = 0
+    do kk = 1, npointstotal
+      Uc = (0.0d0,0.0d0); Uv = (0.0d0,0.0d0)
+      do i = 1, nc_ex; Uc(i,i) = (1.0d0,0.0d0); end do
+      do i = 1, nv_ex; Uv(i,i) = (1.0d0,0.0d0); end do
+      call block_rot(nc_ex, ek(kk, nv_ex+1:nband_ex), Uc, 1.3d0*kk)
+      call block_rot(nv_ex, ek(kk, 1:nv_ex),          Uv, 0.7d0*kk)
+      F = fk_ex(nbasis*(kk-1)+1 : nbasis*kk, :)
+      G2 = (0.0d0,0.0d0)
+      do jc = 1, nc_ex
+        do jcp = 1, nc_ex
+          do jv = 1, nv_ex
+            do jvp = 1, nv_ex
+              G2((jc-1)*nv_ex+jv,:) = G2((jc-1)*nv_ex+jv,:) + conjg(Uc(jcp,jc))*F((jcp-1)*nv_ex+jvp,:)*Uv(jvp,jv)
+            end do
+          end do
+        end do
+      end do
+      if (maxval(abs(G2-F)) > 0.0d0) nd = nd + 1
+      fk_ex(nbasis*(kk-1)+1 : nbasis*kk, :) = G2
+    end do
+    write(*,'(A,I0,A)') '   DEGENERATE-BLOCK SCRAMBLE (OPTICX_DEGEN_SCRAMBLE set): envelopes rotated at ', nd, &
+         ' k-points, on purpose. Never use for production.'
+    deallocate(F, G2)
+  contains
+    !> U <- a unitary inside each block of consecutive bands within tol_deg (angles from seed).
+    subroutine block_rot(nb, e, U, seed)
+      integer,    intent(in)    :: nb
+      real(8),    intent(in)    :: e(nb), seed
+      complex(8), intent(inout) :: U(nb,nb)
+      integer :: b0, b1
+      real(8) :: th, ph1, ph2
+      b0 = 1
+      do while (b0 <= nb)
+        b1 = b0
+        do while (b1 < nb)
+          if (abs(e(b1+1) - e(b1)) >= tol_deg) exit
+          b1 = b1 + 1
+        end do
+        if (b1 == b0 + 1) then                       ! 2x2 block: general SU(2) x U(1)
+          th = seed; ph1 = 2.1d0*seed; ph2 = 0.37d0*seed
+          U(b0,b0)   =  cmplx(cos(th),0.0d0,8)*exp(cmplx(0.0d0,ph1,8))
+          U(b0,b1)   = -cmplx(sin(th),0.0d0,8)*exp(cmplx(0.0d0,ph2,8))
+          U(b1,b0)   =  cmplx(sin(th),0.0d0,8)*exp(cmplx(0.0d0,-ph2,8))
+          U(b1,b1)   =  cmplx(cos(th),0.0d0,8)*exp(cmplx(0.0d0,-ph1,8))
+        end if                                        ! larger blocks: left alone (none on MoS2)
+        b0 = b1 + 1
+      end do
+    end subroutine block_rot
+  end subroutine scramble_degenerate_blocks
+
+  subroutine repair_degenerate_basis(ek)
+    implicit none
+    real(8), intent(in) :: ek(npointstotal, nband_ex)
+    real(8), parameter :: tol_deg = 1.0d-6       ! Hartree (27 microeV): symmetry-exact degeneracies only
+    integer, parameter :: nsweep_max = 30, niter_max = 50
+    integer,    allocatable :: nbp(:,:), nbm(:,:), labc(:,:), labv(:,:), klist(:)
+    complex(8), allocatable :: Tb(:,:), F(:,:), UT(:,:), FU(:,:)
+    real(8)    :: inv2h(3), dRkdK(3,3), chg, maxchg, ucdev, sumdev
+    integer    :: nbasis, kk, i, j, nd, isw, it, idim, sgn, kn, cnt, jc, jcp, jv, jvp, r, rp, n
+    integer    :: nblk
+    complex(8) :: Uc(nc_ex,nc_ex), Uv(nv_ex,nv_ex), Ucold(nc_ex,nc_ex), Uvold(nv_ex,nv_ex)
+    complex(8) :: Wc(nc_ex,nc_ex), Wv(nv_ex,nv_ex), A(nc_ex,nc_ex), C(nv_ex,nv_ex)
+    complex(8), allocatable :: K(:,:)
+    logical    :: degk
+
+    nbasis = nc_ex*nv_ex
+    ! block labels: lab(k,i) = index of the first band of i's block (consecutive bands within tol_deg)
+    allocate(labc(npointstotal, nc_ex), labv(npointstotal, nv_ex), klist(npointstotal))
+    nd = 0; nblk = 0
+    do kk = 1, npointstotal
+      degk = .false.
+      labv(kk,1) = 1
+      do i = 2, nv_ex
+        labv(kk,i) = i
+        if (abs(ek(kk,i) - ek(kk,i-1)) < tol_deg) then; labv(kk,i) = labv(kk,i-1); degk = .true.; nblk = nblk+1; end if
+      end do
+      labc(kk,1) = 1
+      do i = 2, nc_ex
+        labc(kk,i) = i
+        if (abs(ek(kk,nv_ex+i) - ek(kk,nv_ex+i-1)) < tol_deg) then; labc(kk,i) = labc(kk,i-1); degk = .true.; nblk = nblk+1; end if
+      end do
+      if (degk) then; nd = nd + 1; klist(nd) = kk; end if
+    end do
+    if (nd == 0) then
+      write(*,*) '   Basis repair: no exactly degenerate window bands on the mesh, nothing to do'
+      deallocate(labc, labv, klist); return
+    end if
+
+    allocate(nbp(3,npointstotal), nbm(3,npointstotal))
+    call get_kgrid_stencil(nbp, nbm, inv2h, dRkdK)
+    allocate(Tb(nbasis, norb_ex_cut), F(nbasis, norb_ex_cut), UT(nbasis, norb_ex_cut), FU(nbasis, norb_ex_cut))
+    allocate(K(nbasis, nbasis))
+
+    do isw = 1, nsweep_max
+      maxchg = 0.0d0; sumdev = 0.0d0
+      do i = 1, nd
+        kk = klist(i)
+        ! Tbar = mean over the first-order neighbours of K(k,k') f(k')
+        Tb = (0.0d0,0.0d0); cnt = 0
+        do idim = 1, 3
+          if (inv2h(idim) == 0.0d0) cycle
+          do sgn = 1, -1, -2
+            kn = nbp(idim,kk); if (sgn < 0) kn = nbm(idim,kk)
+            do jcp = 1, nc_ex
+              do jc = 1, nc_ex
+                Wc(jc,jcp) = dot_product(win_sevec(:, nv_ex+jc, kk), win_evec(:, nv_ex+jcp, kn))
+              end do
+            end do
+            do jvp = 1, nv_ex
+              do jv = 1, nv_ex
+                Wv(jv,jvp) = dot_product(win_sevec(:, jv, kk), win_evec(:, jvp, kn))
+              end do
+            end do
+            do jc = 1, nc_ex
+              do jv = 1, nv_ex
+                r = (jc-1)*nv_ex + jv
+                do jcp = 1, nc_ex
+                  do jvp = 1, nv_ex
+                    K(r, (jcp-1)*nv_ex + jvp) = Wc(jc,jcp)*conjg(Wv(jv,jvp))
+                  end do
+                end do
+              end do
+            end do
+            call zgemm('N','N', nbasis, norb_ex_cut, nbasis, (1.0d0,0.0d0), K, nbasis, &
+                       fk_ex(nbasis*(kn-1)+1,1), norb_ex, (1.0d0,0.0d0), Tb, nbasis)
+            cnt = cnt + 1
+          end do
+        end do
+        Tb = Tb / dble(cnt)
+        F = fk_ex(nbasis*(kk-1)+1 : nbasis*kk, :)
+
+        ! alternate Procrustes steps for U_c and U_v
+        Uc = (0.0d0,0.0d0); Uv = (0.0d0,0.0d0)
+        do j = 1, nc_ex; Uc(j,j) = (1.0d0,0.0d0); end do
+        do j = 1, nv_ex; Uv(j,j) = (1.0d0,0.0d0); end do
+        do it = 1, niter_max
+          Ucold = Uc; Uvold = Uv
+          ! FU^n = F^n U_v ;  A(c,c') = sum_{v,n} Tbar(c,v,n) conj(FU(c',v,n)) ;  U_c = polar(A)^H per block
+          FU = (0.0d0,0.0d0)
+          do jc = 1, nc_ex
+            do jvp = 1, nv_ex
+              do jv = 1, nv_ex
+                FU((jc-1)*nv_ex+jvp,:) = FU((jc-1)*nv_ex+jvp,:) + F((jc-1)*nv_ex+jv,:)*Uv(jv,jvp)
+              end do
+            end do
+          end do
+          do jcp = 1, nc_ex
+            do jc = 1, nc_ex
+              A(jc,jcp) = (0.0d0,0.0d0)
+              do jv = 1, nv_ex
+                A(jc,jcp) = A(jc,jcp) + sum(Tb((jc-1)*nv_ex+jv,:)*conjg(FU((jcp-1)*nv_ex+jv,:)))
+              end do
+            end do
+          end do
+          call set_block_polar(nc_ex, labc(kk,:), A, Uc, .true.)
+          ! UT^n = U_c Tbar^n ;  C(v,v') = sum_{c,n} conj(F(c,v,n)) UT(c,v',n) ;  U_v = polar(C) per block
+          UT = (0.0d0,0.0d0)
+          do jc = 1, nc_ex
+            do jcp = 1, nc_ex
+              do jv = 1, nv_ex
+                UT((jc-1)*nv_ex+jv,:) = UT((jc-1)*nv_ex+jv,:) + Uc(jc,jcp)*Tb((jcp-1)*nv_ex+jv,:)
+              end do
+            end do
+          end do
+          do jvp = 1, nv_ex
+            do jv = 1, nv_ex
+              C(jv,jvp) = (0.0d0,0.0d0)
+              do jc = 1, nc_ex
+                C(jv,jvp) = C(jv,jvp) + sum(conjg(F((jc-1)*nv_ex+jv,:))*UT((jc-1)*nv_ex+jvp,:))
+              end do
+            end do
+          end do
+          call set_block_polar(nv_ex, labv(kk,:), C, Uv, .false.)
+          if (maxval(abs(Uc-Ucold)) + maxval(abs(Uv-Uvold)) < 1.0d-13) exit
+        end do
+
+        ! f <- U_c^H f U_v
+        FU = (0.0d0,0.0d0)
+        do jc = 1, nc_ex
+          do jcp = 1, nc_ex
+            do jv = 1, nv_ex
+              do jvp = 1, nv_ex
+                FU((jc-1)*nv_ex+jv,:) = FU((jc-1)*nv_ex+jv,:) + &
+                     conjg(Uc(jcp,jc)) * F((jcp-1)*nv_ex+jvp,:) * Uv(jvp,jv)
+              end do
+            end do
+          end do
+        end do
+        chg = sqrt(sum(abs(FU-F)**2)) / max(sqrt(sum(abs(F)**2)), 1.0d-300)
+        maxchg = max(maxchg, chg)
+        ucdev = 0.0d0
+        do j = 1, nc_ex; Uc(j,j) = Uc(j,j) - 1.0d0; end do
+        do j = 1, nv_ex; Uv(j,j) = Uv(j,j) - 1.0d0; end do
+        sumdev = sumdev + maxval(abs(Uc)) + maxval(abs(Uv))
+        fk_ex(nbasis*(kk-1)+1 : nbasis*kk, :) = FU
+      end do
+      if (isw == 1) write(*,'(A,I0,A,I0,A,F7.4)') '   Basis repair: ', nd, ' k-points with exactly degenerate window bands (', &
+                          nblk, ' blocks); mean |U - 1| in the first sweep = ', sumdev/dble(nd)
+      if (maxchg < 1.0d-10) exit
+    end do
+    write(*,'(A,I0,A,ES9.2)') '   Basis repair: converged after ', isw, ' sweeps, last max relative change ', maxchg
+    deallocate(nbp, nbm, labc, labv, klist, Tb, F, UT, FU, K)
+
+  contains
+
+    !> Within each degenerate block B (lab), set U_BB to the unitary maximising Re Tr[U_BB^H M_BB]
+    !! (transpose_h = .false., i.e. polar(Mat)) or Re Tr[U_BB Mat_BB] (.true., polar(Mat)^H). Blocks of size 1
+    !! are left at their current value (non-degenerate band: phase fixed by convention, not repaired).
+    subroutine set_block_polar(nb, lab, Mat, U, transpose_h)
+      integer,    intent(in)    :: nb, lab(nb)
+      complex(8), intent(in)    :: Mat(nb,nb)
+      complex(8), intent(inout) :: U(nb,nb)
+      logical,    intent(in)    :: transpose_h
+      integer :: b0, b1, msz, info, lwork
+      complex(8), allocatable :: Mb(:,:), Wl(:,:), VTr(:,:), work(:)
+      real(8),    allocatable :: sv(:), rwork(:)
+      b0 = 1
+      do while (b0 <= nb)
+        b1 = b0
+        do while (b1 < nb)
+          if (lab(b1+1) /= lab(b0)) exit
+          b1 = b1 + 1
+        end do
+        msz = b1 - b0 + 1
+        if (msz > 1) then
+          allocate(Mb(msz,msz), Wl(msz,msz), VTr(msz,msz), sv(msz), rwork(5*msz), work(1))
+          Mb = Mat(b0:b1, b0:b1)
+          call zgesvd('A','A', msz, msz, Mb, msz, sv, Wl, msz, VTr, msz, work, -1, rwork, info)
+          lwork = max(1, int(dble(work(1)))); deallocate(work); allocate(work(lwork))
+          call zgesvd('A','A', msz, msz, Mb, msz, sv, Wl, msz, VTr, msz, work, lwork, rwork, info)
+          if (transpose_h) then
+            U(b0:b1, b0:b1) = conjg(transpose(matmul(Wl, VTr)))
+          else
+            U(b0:b1, b0:b1) = matmul(Wl, VTr)
+          end if
+          deallocate(Mb, Wl, VTr, sv, rwork, work)
+        end if
+        b0 = b1 + 1
+      end do
+    end subroutine set_block_polar
+  end subroutine repair_degenerate_basis
+
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   ! x_nm = -i*p_nm/(E_n-E_m) for n != m, the standard single-particle position-from-momentum
   ! relation (feeds Y_cc/Y_vv in get_ome_inter_ex_sum_k, and the ground-state xme_ex_t sum in
@@ -515,7 +806,7 @@ contains
     complex(8), intent(inout) :: out_v(norb_ex_cut, norb_ex_cut)
     complex(8), intent(inout) :: out_y(norb_ex_cut, norb_ex_cut)
     complex(8), intent(inout) :: out_q(norb_ex_cut, norb_ex_cut)
-    ! Two accumulators, not six (HANDOFF 8.45). The Y and Q pieces both belong to X_nm and the two
+    ! Two accumulators, not six. The Y and Q pieces both belong to X_nm and the two
     ! V pieces both belong to P_nm; they were only ever summed, so they are summed here.
     complex(8), intent(inout) :: xme_ex_inter_t(3, norb_ex_cut, norb_ex_cut)
     complex(8), intent(inout) :: vme_ex_inter_t(3, norb_ex_cut, norb_ex_cut)
@@ -703,7 +994,7 @@ contains
 !! intensity ~2) and is therefore bound by memory traffic, not arithmetic. Worse, the scratch arrays it
 !! needs are (N,N) PER THREAD, so the aggregate working set grows as 48*nthreads*N^2 bytes and leaves
 !! cache as soon as N or the thread count grows: measured on hBN_N60, the loop scaled x3.3 at N = 100,
-!! ran 2.6x SLOWER than serial at N = 400, and gained nothing at all at N = 800 (HANDOFF 8.51).
+!! ran 2.6x SLOWER than serial at N = 400, and gained nothing at all at N = 800.
 !!
 !! The fix is to fold the k index into the zgemm's inner dimension. The key identity is that the
 !! per-k blocks are contiguous slices of fk_ex: get_ex_index_first gives
@@ -733,6 +1024,8 @@ contains
     complex(8), intent(in) :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
 
     complex(8), allocatable :: G(:,:), accX(:,:), accV(:,:)
+    integer,    allocatable :: nbp(:,:), nbm(:,:)
+    real(8)    :: inv2h(3), dRkdK(3,3)
     integer    :: nj, ibz, ic, icp, iv, ivp, base, irow, icol
     real(8)    :: berry_shift
     complex(8), parameter :: ci    = (0.0d0, 1.0d0)
@@ -742,6 +1035,10 @@ contains
 
     allocate(G(norb_ex, norb_ex_cut))
     allocate(accX(norb_ex_cut, norb_ex_cut), accV(norb_ex_cut, norb_ex_cut))
+    if (xnm_covariant) then
+      allocate(nbp(3, npointstotal), nbm(3, npointstotal))
+      call get_kgrid_stencil(nbp, nbm, inv2h, dRkdK)
+    end if
 
     do nj = 1, 3
       accX = czero
@@ -752,9 +1049,6 @@ contains
       call build_cond(vme_ex_band, .false.)
       call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cone, fk_ex, norb_ex, &
                  G, norb_ex, cone, accV, norb_ex_cut)
-      call build_cond(xme_ex_band, .true.)
-      call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cone, fk_ex, norb_ex, &
-                 G, norb_ex, cone, accX, norb_ex_cut)
 
       ! ---- valence block: -sum_k sum_ic Wv^H (B_vv Wv), Wv(iv,:) = fk_ex(idx(k,ic,iv),:) -----------
       ! NOTE the band-index order B_vv(iv,ivp) = vme(...,ivp,iv) is TRANSPOSED on purpose; see the
@@ -762,6 +1056,21 @@ contains
       call build_val(vme_ex_band, .false.)
       call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cmone, fk_ex, norb_ex, &
                  G, norb_ex, cone, accV, norb_ex_cut)
+
+      if (xnm_covariant) then
+        ! ---- X_nm, covariant form: fk_ex^H [ i D f + xi2_c f - f xi2_v ] ----------
+        ! replaces the four finite_difference pieces below (Y_cc, Y_vv, Q1, Q2) in one term.
+        call build_xcov()
+        call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cone, fk_ex, norb_ex, &
+                   G, norb_ex, cone, accX, norb_ex_cut)
+        xme_ex_inter(nj,:,:) = accX
+        vme_ex_inter(nj,:,:) = accV
+        cycle
+      end if
+
+      call build_cond(xme_ex_band, .true.)
+      call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cone, fk_ex, norb_ex, &
+                 G, norb_ex, cone, accX, norb_ex_cut)
       call build_val(xme_ex_band, .true.)
       call zgemm('C','N', norb_ex_cut, norb_ex_cut, norb_ex, cmone, fk_ex, norb_ex, &
                  G, norb_ex, cone, accX, norb_ex_cut)
@@ -800,8 +1109,101 @@ contains
     end do
 
     deallocate(G, accX, accV)
+    if (allocated(nbp)) deallocate(nbp, nbm)
 
   contains
+
+    !> G(block k,:) = i * sum_i dRkdK(i,nj) D_i f(k) + L(k) f(k), with the FOURTH-order transported
+    !! central difference D_i f = [8 (T(k+b_i) - T(k-b_i)) - (T(k+2b_i) - T(k-2b_i))] / (12 h_i),
+    !! T(k') = K(k,k') f(k'). Fourth order because the transported difference also discretises the
+    !! connection (W = 1 - i b.xi^(1) + O(b^2)), which the finite_difference form takes analytically:
+    !! at second order the covariant form was ~15-30% LESS accurate than that form on hBN 30x30 (D3h
+    !! residual 5.08% vs 4.39%). At fourth order it is MORE accurate: D3h residual 2.7% vs 4.4%, and
+    !! electro-optic 5.8% vs 15.2%, on the same hBN 30x30 data.
+    !!
+    !! Discrete covariant derivative of the exciton envelope f(k) (an nc x nv matrix per exciton).
+    !! The neighbour's envelope is first carried into the basis at k with the window overlaps
+    !! W_c = (S c_c(k))^H c_c(k'), W_v likewise: f -> W_c f(k') W_v^H, i.e. K(idx(c,v),idx(c',v')) =
+    !! W_c(c,c') conj(W_v(v,v')). Expanding W = 1 - i b.xi^(1) gives i d f + xi^(1)_c f - f xi^(1)_v,
+    !! and L adds the Wannier-position part, (L f)_cv = sum_c' xi2_cc' f_c'v - sum_v' f_cv' xi2_v'v,
+    !! so together this is Taghizadeh & Pedersen Eq. (B3b)'s i d f + xi_c f - f xi_v with the FULL
+    !! in-window connection, off-diagonal elements included. Under any per-k unitary rotation U(k) of
+    !! the window bands, f -> U_c^H f U_v and W(k,k') -> U(k)^H W U(k'), so every term transforms
+    !! covariantly and X_nm = sum_k f^n(k)^H G^m(k) is invariant EXACTLY, on the discrete mesh:
+    !! eigenvector phase jumps and arbitrary bases inside (near-)degenerate multiplets drop out. The
+    !! finite_difference form needs a gauge that is smooth between neighbours; on MoS2 the phase-fixed
+    !! gauge jumps by > 0.5 rad on 11.8% of the neighbour links (hBN: 0%).
+    subroutine build_xcov()
+      integer    :: kk, b, idim, sgn, kn, jc, jcp, jv, jvp, r, rp, istep
+      complex(8) :: Wc(nc_ex,nc_ex), Wv(nv_ex,nv_ex), K(nbasis,nbasis), alpha
+      real(8)    :: cf
+      real(8), parameter :: wstep(2) = [4.0d0/3.0d0, -1.0d0/6.0d0]   ! x 1/(2h): (8 D1 - D2)/(12 h)
+      !$omp parallel do default(none) schedule(dynamic) &
+      !$omp   private(kk, b, idim, sgn, kn, jc, jcp, jv, jvp, r, rp, Wc, Wv, K, alpha, cf, istep) &
+      !$omp   shared(G, fk_ex, win_evec, win_sevec, win_xi2, nbp, nbm, inv2h, dRkdK, nj, nbasis, &
+      !$omp          npointstotal, nc_ex, nv_ex, norb_ex, norb_ex_cut)
+      do kk = 1, npointstotal
+        b = nbasis*(kk-1)
+        ! L(k): Wannier-position connection on the window, conduction (+) and valence (-, transposed)
+        K = czero
+        do jc = 1, nc_ex
+          do jv = 1, nv_ex
+            r = (jc-1)*nv_ex + jv
+            do jcp = 1, nc_ex
+              rp = (jcp-1)*nv_ex + jv
+              K(r,rp) = K(r,rp) + win_xi2(kk, nj, nv_ex+jc, nv_ex+jcp)
+            end do
+            do jvp = 1, nv_ex
+              rp = (jc-1)*nv_ex + jvp
+              K(r,rp) = K(r,rp) - win_xi2(kk, nj, jvp, jv)
+            end do
+          end do
+        end do
+        call zgemm('N','N', nbasis, norb_ex_cut, nbasis, cone, K, nbasis, fk_ex(b+1,1), norb_ex, &
+                   czero, G(b+1,1), norb_ex)
+        ! transported central differences along each active crystal direction
+        do idim = 1, 3
+         do istep = 1, 2
+          cf = dRkdK(idim, nj) * inv2h(idim) * wstep(istep)
+          if (cf == 0.0d0) cycle
+          do sgn = 1, -1, -2
+            if (sgn == 1) then
+              kn = nbp(idim, kk)
+              if (istep == 2) kn = nbp(idim, kn)
+            else
+              kn = nbm(idim, kk)
+              if (istep == 2) kn = nbm(idim, kn)
+            end if
+            do jcp = 1, nc_ex
+              do jc = 1, nc_ex
+                Wc(jc,jcp) = dot_product(win_sevec(:, nv_ex+jc, kk), win_evec(:, nv_ex+jcp, kn))
+              end do
+            end do
+            do jvp = 1, nv_ex
+              do jv = 1, nv_ex
+                Wv(jv,jvp) = dot_product(win_sevec(:, jv, kk), win_evec(:, jvp, kn))
+              end do
+            end do
+            do jc = 1, nc_ex
+              do jv = 1, nv_ex
+                r = (jc-1)*nv_ex + jv
+                do jcp = 1, nc_ex
+                  do jvp = 1, nv_ex
+                    rp = (jcp-1)*nv_ex + jvp
+                    K(r,rp) = Wc(jc,jcp) * conjg(Wv(jv,jvp))
+                  end do
+                end do
+              end do
+            end do
+            alpha = cmplx(0.0d0, dble(sgn)*cf, 8)          ! i * (+-) cf
+            call zgemm('N','N', nbasis, norb_ex_cut, nbasis, alpha, K, nbasis, &
+                       fk_ex(nbasis*(kn-1)+1,1), norb_ex, cone, G(b+1,1), norb_ex)
+          end do
+         end do
+        end do
+      end do
+      !$omp end parallel do
+    end subroutine build_xcov
 
     !> G(idx(k,ic,iv),:) = sum_icp M(k,nj,nv+ic,nv+icp) * fk_ex(idx(k,icp,iv),:)
     !! zero_diag removes the ic == icp term, which is how Y_cc is built from xme_ex_band.
@@ -876,7 +1278,8 @@ contains
 ! (method B uses them directly; method A rebuilds Pi from them, Pi_n = -i E_n X_n,
 ! Pi_nm = i(E_n-E_m) X_nm), but the V arrays are cached too so that a hit is a FAITHFUL substitute for
 ! the routine rather than a partial one -- leaving them unallocated or zeroed would turn any future use
-! into silent garbage. NOTE they are the BARE momentum P, not Pi (CLAUDE.md); caching them does not make
+! into silent garbage. NOTE they are the BARE momentum P (Taghizadeh & Pedersen 2018, Eq. B2a), not the
+! Heisenberg momentum Pi (Eq. 10 there: Pi_n = P_n - i F_n); caching them does not make
 ! them safe to use in a second-order formula.
 !
 ! Format: unformatted stream. Text would be ~5x larger and slow to parse. Total payload is
@@ -889,13 +1292,24 @@ contains
 ! automatic.
 !
 ! VERSION 2 (2026-09-30) added nband_index to the header. Version 1 recorded only the COUNTS nv_ex and
-! nc_ex, so it could not tell [60,61] from [61,60] -- exactly the band-order defect of HANDOFF 8.53,
-! which silently invalidated a whole ReS2 artifact set and was found only by comparing physical results.
+! nc_ex, so it could not tell [60,61] from [61,60]: a cache written with two conduction bands swapped once
+! silently invalidated a whole ReS2 result set (excitonic shift 2.23x too large) and was found only by
+! comparing physical results.
 ! A v1 file is now rejected as a clean miss (it cannot be upgraded: the order it was written with is
 ! unknowable), and a v2 file whose band list differs from the current one STOPS the run, like the
 ! dimension and energy mismatches, because reusing elements built on a different band set is a wrong
 ! answer rather than a slow one.
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+  !> Cache code for the X_nm method: 1 = finite_difference, 2 = covariant.
+  integer function xnm_method_code()
+    implicit none
+    if (xnm_covariant) then
+      xnm_method_code = 2
+    else
+      xnm_method_code = 1
+    end if
+  end function xnm_method_code
 
   subroutine ome_ex_cache_name(fname)
     implicit none
@@ -908,7 +1322,7 @@ contains
   subroutine write_ome_ex_second()
     implicit none
     character(len=14), parameter :: MAGIC = 'OPTICX-OMEEX2 '
-    integer,           parameter :: VERSION = 2
+    integer,           parameter :: VERSION = 3
     character(len=256) :: fname
     integer :: u, ios, m
 
@@ -932,6 +1346,7 @@ contains
     write(u) npointstotal, nv_ex, nc_ex, norb_ex_cut
     write(u) nband_ex                                 ! v2: the band LIST, not just the counts --
     write(u) nband_index(1:nband_ex)                  ! nv/nc alone cannot tell [60,61] from [61,60]
+    write(u) xnm_method_code()                        ! v3: how X_nm was built
     write(u) e_ex(1:norb_ex_cut)                      ! fingerprint of the Xatu solution
     write(u) xme_ex(1:3, 1:norb_ex_cut)
     write(u) vme_ex(1:3, 1:norb_ex_cut)
@@ -951,12 +1366,32 @@ contains
 ! the caller must then run the k-loop as before. Never stops the run: a bad cache is a miss, not a
 ! failure, EXCEPT for a dimension/energy mismatch, which is reported loudly because silently reusing
 ! elements from a different grid or exciton set would be a wrong answer rather than a slow one.
+  !> OME_ex = none with Cache_ome_ex = read|readwrite on a second-order run: take the excitonic matrix elements
+  !! from the cache, as OME_sp = none takes the single-particle ones from the .omesp. Nothing is computed, so a
+  !! miss (no file, another system, a smaller cache, truncated) stops the run.
+  subroutine get_ome_ex_from_cache()
+    implicit none
+    logical :: hit
+    character(len=256) :: fname
+    write(*,*) '6. Entering ome_ex'
+    inter_terms_ready = .false.
+    call read_ome_ex_second(hit)
+    if (.not. hit) then
+      call ome_ex_cache_name(fname)
+      write(*,*) 'ERROR (ome_ex): OME_ex = none reads the excitonic matrix elements from '//trim(fname)//','
+      write(*,*) '       which does not hold them for this run (see the message above, if any). Set OME_ex = nonlinear'
+      write(*,*) '       with Cache_ome_ex = write or readwrite once to create it.'
+      stop 1
+    end if
+  end subroutine get_ome_ex_from_cache
+
   subroutine read_ome_ex_second(ok)
     implicit none
     logical, intent(out) :: ok
     character(len=14), parameter :: MAGIC = 'OPTICX-OMEEX2 '
-    integer,           parameter :: VERSION = 2
+    integer,           parameter :: VERSION = 3
     real(8),           parameter :: ETOL = 1.0d-10
+    integer :: method_in
     character(len=256) :: fname
     character(len=14)  :: magic_in
     character(len=256) :: mat_in
@@ -980,8 +1415,12 @@ contains
     if (ios /= 0 .or. magic_in /= MAGIC .or. ver /= VERSION) then
       if (ios == 0 .and. magic_in == MAGIC .and. ver == 1) then
         write(*,*) '   Cache '//trim(fname)//' is format version 1, which does NOT record the band'
-        write(*,*) '        list and therefore cannot be checked for the band-order defect of'
-        write(*,*) '        HANDOFF 8.53. Ignoring it and recomputing; delete the file.'
+        write(*,*) '        list and therefore cannot be checked for bands stored in a different'
+        write(*,*) '        order. Ignoring it and recomputing; delete the file.'
+      else if (ios == 0 .and. magic_in == MAGIC .and. ver == 2) then
+        write(*,*) '   Cache '//trim(fname)//' is format version 2, written before the covariant X_nm'
+        write(*,*) '        derivative and without a record of how X_nm was built.'
+        write(*,*) '        Ignoring it and recomputing; delete the file.'
       else
         write(*,*) '   Cache '//trim(fname)//' has a different format, ignoring it.'
       end if
@@ -1005,7 +1444,7 @@ contains
       close(u); stop 1
     end if
     ! v2: the BAND LIST. nv_ex/nc_ex above are only counts, and both [60,61] and [61,60] give
-    ! nv = 4, nc = 2 -- which is precisely why the HANDOFF 8.53 defect survived a count-based check.
+    ! nv = 4, nc = 2 -- which is precisely why a swapped band order survived a count-based check.
     read(u, iostat=ios) nband_in
     if (ios /= 0) then; close(u); return; end if
     if (nband_in /= nband_ex) then
@@ -1022,11 +1461,21 @@ contains
       write(*,*) '          (or the same bands in a different ORDER, which is just as wrong).'
       write(*,'(A,20I5)') '          cached band list: ', nbidx_in
       write(*,'(A,20I5)') '          current band list: ', nband_index(1:nband_ex)
-      write(*,*) '          The exciton envelopes would be paired with the wrong bands -- see'
-      write(*,*) '          HANDOFF 8.53. Delete it or move it aside.'
+      write(*,*) '          The exciton envelopes would be paired with the wrong bands.'
+      write(*,*) '          Delete it or move it aside.'
       deallocate(nbidx_in); close(u); stop 1
     end if
     deallocate(nbidx_in)
+    ! v3: the X_nm method. Elements built by the other method are a different answer, not a slower one.
+    read(u, iostat=ios) method_in
+    if (ios /= 0) then; close(u); return; end if
+    if (method_in /= xnm_method_code()) then
+      write(*,*) '   ERROR (read_ome_ex_second): '//trim(fname)//' was built with a DIFFERENT X_nm method.'
+      write(*,'(A,I0,A,I0,A)') '          cached: ', method_in, '   wanted: ', xnm_method_code(), &
+           '   (1 = finite_difference, 2 = covariant; keyword Xnm_derivative)'
+      write(*,*) '          Delete it or move it aside, or set Xnm_derivative to match.'
+      close(u); stop 1
+    end if
 
     if (nex_in < norb_ex_cut) then
       write(*,'(A,I0,A,I0,A)') '   Cache holds only ', nex_in, ' excitons but ', norb_ex_cut, &
@@ -1092,8 +1541,6 @@ contains
     close(u)
     ok = .false.
     return
-    write(*,'(A,I0,A,A)') '   Second-order excitonic OMEs read from cache (', norb_ex_cut, &
-         ' excitons) -- k-loop skipped: ', trim(fname)
   end subroutine read_ome_ex_second
 
   subroutine write_ome_ex_linear(vme_ex)
@@ -1169,9 +1616,26 @@ contains
                                     berry_eigen_ex_band, gen_der_ex_band, &
                                     shift_vector_ex_band, vme_ex_band, ek, &
                                     vme_abs_der_ex_band, vme_abs_der_found, &
-                                    vme_der_pt_ex_band, vme_der_pt_found)
+                                    vme_der_pt_ex_band, vme_der_pt_found, &
+                                    cov_rgen_ex_band, cov_vraw_ex_band, cov_blk_ex_band, cov_found, &
+                                    cov_nb_T, cov_nb_r, cov_nb_e, cov_xi, shgcov_found)
    implicit none
    integer :: iounit10
+   ! optional (Response = shift_covariant): appended after vme_der_pt_ex_band, only present
+   ! when the file was written by a shift_covariant run. Read only together with the two arrays above.
+   complex(8), intent(out), optional :: cov_rgen_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+   complex(8), intent(out), optional :: cov_vraw_ex_band(npointstotal, 3, nband_ex, nband_ex)
+   integer,    intent(out), optional :: cov_blk_ex_band(npointstotal, nband_ex)
+   logical,    intent(out), optional :: cov_found
+   integer :: ios_cov, ios_tag, tag_r, flags_r, norb_r
+   integer(8) :: pos0, pos1
+   ! optional (Response = shg_covariant): appended after cov_blk_ex_band
+   complex(8), intent(out), optional :: cov_nb_T(npointstotal, 6, nband_ex, nband_ex)
+   complex(8), intent(out), optional :: cov_nb_r(npointstotal, 7, 3, nband_ex, nband_ex)
+   real(8),    intent(out), optional :: cov_nb_e(npointstotal, 7, nband_ex)
+   complex(8), intent(out), optional :: cov_xi(npointstotal, 3, nband_ex, nband_ex)
+   logical,    intent(out), optional :: shgcov_found
+   integer :: ios_shg
    integer, intent(in)  :: iflag_norder, npointstotal, nband_ex
    ! optional: derivative of |v|, appended after the per-k records; absent in older files
    real(8),    intent(out), optional :: vme_abs_der_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
@@ -1185,7 +1649,7 @@ contains
    real(8), intent(out) :: ek(npointstotal, nband_ex)
    complex(8), intent(out) :: vme_ex_band(npointstotal, 3, nband_ex, nband_ex)
    complex(8), intent(out) :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
-   ! OPTIONAL (HANDOFF 8.45): the shift vector and the sum-rule generalized derivative. Records for
+   ! OPTIONAL: the shift vector and the sum-rule generalized derivative. Records for
    ! them sit between the per-k records the excitonic path does need, so they must still be READ --
    ! but a caller that never looks at them can omit the arrays and let the reader discard each record
    ! into a one-k-point scratch. get_ome_ex does exactly that: it used to allocate, zero and fill
@@ -1248,6 +1712,49 @@ contains
       end if
       if (ios_vdpt /= 0) vme_der_pt_ex_band = (0.0d0, 0.0d0)
       if (present(vme_der_pt_found)) vme_der_pt_found = (ios_vdpt == 0)
+   end if
+
+   if (present(cov_rgen_ex_band)) then
+      ios_cov = -1; ios_shg = -1
+      if (present(vme_der_pt_ex_band)) then
+         if (ios_vdpt == 0) then
+            ! Tagged tail (files written since 2026-10-06, see OMESP_TAG in ome_sp): the flags say which
+            ! sections follow; the A4 rotation and window states come first and are skipped here (the
+            ! excitonic stage loads them through load_omesp_basis). Untagged (older) files: the covariant
+            ! arrays, if present, follow directly.
+            inquire(unit=iounit10, pos=pos0)
+            read(iounit10, iostat=ios_tag) tag_r, flags_r, norb_r
+            if (ios_tag == 0 .and. tag_r == OMESP_TAG) then
+               pos1 = pos0 + 12
+               if (btest(flags_r, 0)) pos1 = pos1 + int(npointstotal,8)*nband_ex*nband_ex*16
+               if (btest(flags_r, 1)) pos1 = pos1 + 2*int(norb_r,8)*nband_ex*npointstotal*16 &
+                                               + int(npointstotal,8)*3*nband_ex*nband_ex*16
+               if (btest(flags_r, 2)) then
+                  read(iounit10, pos=pos1, iostat=ios_cov) cov_rgen_ex_band
+                  if (ios_cov == 0) read(iounit10, iostat=ios_cov) cov_vraw_ex_band
+                  if (ios_cov == 0) read(iounit10, iostat=ios_cov) cov_blk_ex_band
+               end if
+               if (btest(flags_r, 3) .and. ios_cov == 0 .and. present(cov_nb_T)) then
+                  read(iounit10, iostat=ios_shg) cov_nb_T
+                  if (ios_shg == 0) read(iounit10, iostat=ios_shg) cov_nb_r
+                  if (ios_shg == 0) read(iounit10, iostat=ios_shg) cov_nb_e
+                  if (ios_shg == 0) read(iounit10, iostat=ios_shg) cov_xi
+               end if
+            else
+               read(iounit10, pos=pos0, iostat=ios_cov) cov_rgen_ex_band
+               if (ios_cov == 0) read(iounit10, iostat=ios_cov) cov_vraw_ex_band
+               if (ios_cov == 0) read(iounit10, iostat=ios_cov) cov_blk_ex_band
+               if (ios_cov == 0 .and. present(cov_nb_T)) then
+                  read(iounit10, iostat=ios_shg) cov_nb_T
+                  if (ios_shg == 0) read(iounit10, iostat=ios_shg) cov_nb_r
+                  if (ios_shg == 0) read(iounit10, iostat=ios_shg) cov_nb_e
+                  if (ios_shg == 0) read(iounit10, iostat=ios_shg) cov_xi
+               end if
+            end if
+         end if
+      end if
+      if (present(cov_found)) cov_found = (ios_cov == 0)
+      if (present(shgcov_found)) shgcov_found = (ios_shg == 0)
    end if
 
    close(iounit10)

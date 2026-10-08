@@ -12,12 +12,15 @@
 
 opticx computes the **linear and nonlinear optical response of crystals**, both at the
 independent-particle level and including excitonic effects. Starting from a Wannier90 tight-binding
-model — and, optionally, exciton eigenstates obtained with
+model (orthonormal, or with an overlap matrix) — and, optionally, exciton eigenstates obtained with
 [Xatu](https://github.com/alejandrojuria/xatu) — it evaluates the first- and second-order optical
 conductivities: absorbance, second-harmonic generation, the electro-optic (Pockels) effect, optical
 rectification and the shift current. All of the second-order processes are branches of one general
 two-frequency response σ(ω₁+ω₂; ω₁, ω₂), which can also be scanned as a full two-dimensional map.
 
+<p align="center">
+  <img src="hbn_opticx_example.png" width="90%" height="90%">
+</p>
 
 The theory behind the code, the conventions it follows and usage examples are described in the
 [documentation](#documentation). The implementation follows
@@ -68,10 +71,19 @@ would rather link against MKL.
 The test suite needs Python 3 with NumPy, and matplotlib if you want the diagnostic plots:
 ```
 make test test_matrix                       # kernel equivalence
+make run_test_shg_consistency               # SHG kernels on synthetic data
 make run_test_shift_real run_test_shg_real  # real-data physics checks
 make run_test_second_symmetry               # two-frequency symmetry checks
 make check_sp_shift check_sp_shg            # against independent NumPy evaluations
-make check_ome_cache                        # matrix-element cache
+make check_shift_covariant                  # degenerate-band (covariant) methods
+make check_realtime_sign                    # absolute sign and normalisation vs a real-time simulation
+make check_ex_rectification                 # excitonic rectification, injection current included
+make check_out_of_plane                     # out-of-plane components and injection sign vs real time
+make check_gauge_covariance                 # invariance under eigenvector gauge changes
+make check_tb_hermiticity                   # model-file Hermiticity check and repair
+make check_bandlist_guard                   # band-window report and unusual-Bandlist warning
+make check_bands                            # band structure along a k-path (Kpath, Response = bands)
+make check_ome_cache check_a4_basis_guard   # matrix-element cache and basis guards
 ```
 Each prints `ALL TESTS PASSED` or `ALL CHECKS PASSED`.
 

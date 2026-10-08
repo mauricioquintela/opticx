@@ -27,7 +27,12 @@ program opticx
   call get_optics_xatu_dim()
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   call get_energy_bands()
-  !pause
+  ! Response = bands: the band structure only (the Kpath of the input, or the lattice's default path)
+  if (trim(response_text) == 'bands') then
+    write(*,*) 'Response = bands: band structure written, no optical response requested'
+    write(*,*) 'Opticx calculation ended'
+    stop
+  end if
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   !evaluate single particle optical matrix elements: only VME by now
   call get_ome()
