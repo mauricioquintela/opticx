@@ -1,7 +1,7 @@
 module sigma_second_sp
   use constants_math
   use parser_input_file, &
-  only:nf,e1,e2,eta,nw,response_text,broadening_type_text,sp_covariant,build_freq_pairs, &
+  only:nf,e1,e2,eta,nw,response_text,broadening_type_text,sp_covariant,build_freq_pairs,ndim, &
   freq_ratio,e1b,e2b,nwb,two_freq_grid
   use parser_wannier90_tb, &
   only:material_name
@@ -12,7 +12,7 @@ module sigma_second_sp
   rkxvector,rkyvector,rkzvector !k-vectors only used for testing
   use ome_ex, &
   only:read_ome_sp_nonlinear !routine
-  use ome_sp, only: cov_exact_tol
+  use ome_sp, only: cov_exact_tol, valley_ratio
   implicit none
 
   contains
@@ -431,45 +431,85 @@ module sigma_second_sp
   real*8,     allocatable :: wp(:), shift_vector_w(:,:,:), shift_vector_w_t(:,:,:)
   complex*16, allocatable :: sigma_w_sp(:,:,:,:), sigma_w_sp_t(:,:,:,:)
   real*8 :: eta2
-  integer :: ibz, nexact, nexact_t
-  real*8,     allocatable :: e_k(:), sv_k(:,:,:,:)
+  integer :: ibz, nexact, nexact_t, nvalley, nvalley_t
+  real*8,     allocatable :: e_k(:), sv_k(:,:,:,:), vfl_k(:,:)
   complex*16, allocatable :: v_k(:,:,:), rg_k(:,:,:,:)
   integer,    allocatable :: lab_k(:)
 
   allocate(wp(nw), sigma_w_sp(3,3,3,nw), shift_vector_w(3,3,nw))
   call initialize_sigma_second_arrays(nw, wp, eta2, sigma_w_sp)
   shift_vector_w = 0.0d0
-  nexact = 0
+  nexact = 0; nvalley = 0
   write(*,*) '    Evaluating shift conductivity (sp), block-covariant generalised derivative...'
 
   !$OMP PARALLEL DEFAULT(NONE) &
   !$OMP   SHARED(npointstotal, nband_ex, ek, shift_vector_ex_band, vraw, rgen, blk, nw, wp, eta2, &
-  !$OMP          sigma_w_sp, shift_vector_w, nexact) &
-  !$OMP   PRIVATE(ibz, sigma_w_sp_t, shift_vector_w_t, nexact_t, e_k, sv_k, v_k, rg_k, lab_k)
+  !$OMP          sigma_w_sp, shift_vector_w, nexact, nvalley) &
+  !$OMP   PRIVATE(ibz, sigma_w_sp_t, shift_vector_w_t, nexact_t, nvalley_t, e_k, sv_k, v_k, rg_k, lab_k, vfl_k)
   allocate(sigma_w_sp_t(3,3,3,nw), shift_vector_w_t(3,3,nw))
   allocate(e_k(nband_ex), sv_k(3,3,nband_ex,nband_ex), v_k(3,nband_ex,nband_ex), rg_k(3,3,nband_ex,nband_ex))
-  allocate(lab_k(nband_ex))
-  sigma_w_sp_t = (0.0d0,0.0d0); shift_vector_w_t = 0.0d0; nexact_t = 0
+  allocate(lab_k(nband_ex), vfl_k(nband_ex,nband_ex))
+  sigma_w_sp_t = (0.0d0,0.0d0); shift_vector_w_t = 0.0d0; nexact_t = 0; nvalley_t = 0
   !$OMP DO SCHEDULE(DYNAMIC)
   do ibz = 1, npointstotal
     e_k = ek(ibz,:); v_k = vraw(ibz,:,:,:); rg_k = rgen(ibz,:,:,:,:); lab_k = blk(ibz,:)
     sv_k = shift_vector_ex_band(ibz,:,:,:,:)
+    call valley_floor(ibz, vfl_k)
     call get_shift_intens_cov(nband_ex, nw, e_k, v_k, rg_k, lab_k, sv_k, wp, eta2, sigma_w_sp_t, &
-         shift_vector_w_t, nexact_t)
+         shift_vector_w_t, nexact_t, vfl_k, nvalley_t)
   end do
   !$OMP END DO
   !$OMP CRITICAL
   sigma_w_sp = sigma_w_sp + sigma_w_sp_t
   shift_vector_w = shift_vector_w + shift_vector_w_t
-  nexact = nexact + nexact_t
+  nexact = nexact + nexact_t; nvalley = nvalley + nvalley_t
   !$OMP END CRITICAL
-  deallocate(sigma_w_sp_t, shift_vector_w_t, e_k, sv_k, v_k, rg_k, lab_k)
+  deallocate(sigma_w_sp_t, shift_vector_w_t, e_k, sv_k, v_k, rg_k, lab_k, vfl_k)
   !$OMP END PARALLEL
 
   if (nexact > 0) write(*,*) '    pairs degenerate to numerical precision inside blocks (no lineshape term):', nexact
+  if (nvalley > 0) write(*,*) '    pairs at an unresolved minimum of their splitting (no lineshape term):    ', nvalley
   call print_sigma_second_sp(nw, wp, sigma_w_sp, shift_vector_w)
   write(*,*) '    Shift conductivity (sp) has been printed'
   deallocate(wp, sigma_w_sp, shift_vector_w)
+
+  contains
+    !> For every band pair n < l of the window: the largest, over the mesh axes, of the smaller of its splittings
+    !! E_l - E_n at the two neighbouring mesh points along that axis (vfl(n,l); vfl(l,n) the same). A pair whose
+    !! splitting at this point is far below this value sits at a minimum of its splitting that the mesh does not
+    !! resolve (see get_shift_intens_cov). The mesh is the Monkhorst-Pack grid of get_grid / Xatu, first axis fastest.
+    subroutine valley_floor(ik, vfl)
+      integer, intent(in) :: ik
+      real*8, intent(out) :: vfl(nband_ex,nband_ex)
+      integer :: idx(3), d, sgn, j, nn, n, l, nsq
+      real*8 :: sm(nband_ex,nband_ex), s1
+      vfl = 0.0d0
+      ! mesh points per axis from the k-point count: npointstotal_sq is not set on the Xatu-input path
+      nsq = nint(dble(npointstotal)**(1.0d0/dble(ndim)))
+      if (nsq < 3 .or. nsq**ndim /= npointstotal) return      ! not a full N^ndim mesh: no neighbours, rule off
+      j = ik - 1
+      idx = 0
+      do d = 1, ndim
+        idx(d) = mod(j, nsq); j = j/nsq
+      end do
+      do d = 1, ndim
+        do sgn = -1, 1, 2
+          j = idx(d); idx(d) = modulo(idx(d) + sgn, nsq)
+          nn = 1 + idx(1) + nsq*(idx(2) + nsq*idx(3))
+          idx(d) = j
+          do n = 1, nband_ex
+            do l = n + 1, nband_ex
+              s1 = ek(nn,l) - ek(nn,n)
+              if (sgn == -1) then
+                sm(n,l) = s1
+              else
+                vfl(n,l) = max(vfl(n,l), min(sm(n,l), s1)); vfl(l,n) = vfl(n,l)
+              end if
+            end do
+          end do
+        end do
+      end do
+    end subroutine valley_floor
   end subroutine get_sigma_shift_cov_sp
 
   !> One k-point of get_sigma_shift_cov_sp. With r^c_nm = -i v^c_nm/(E_n - E_m) (bands in different blocks),
@@ -485,7 +525,18 @@ module sigma_second_sp
   !!       divided by a noise-level splitting. cov_exact_tol = 1e-6 Ha: the Gamma-M degeneracy of the MoS2
   !!       Wannier model is split by 1e-10..1e-6 Ha (282 of 8100 k at 90x90); results are identical for
   !!       1e-7..1e-5 Ha and wrong at 1e-8 (C3 18%), on F = 0 and on field-split F = 0.2 alike.
-  subroutine get_shift_intens_cov(nb, nw, e, v, rg, lab, sv, wp, eta2, sig, svw, nexact)
+  !!       Also skipped where the pair's splitting is below valley_ratio (0.3) of its splitting at both
+  !!       neighbouring mesh points along some axis (vfl, from get_sigma_shift_cov_sp): an unresolved minimum
+  !!       of the splitting. The term is principal-value-like, G/(E_n - E_l), and a point on the floor of a
+  !!       valley narrower than the mesh step stands for a whole cell in which the splitting is much larger:
+  !!       a mesh LINE of such points (the zone edge of GeS and SnTe, where a glide makes bands stick in pairs
+  !!       that the Wannier fit splits by 0.1-20 meV) contributes ~1/N and never converges (GeS forbidden
+  !!       sigma^xxz = 448 / 224 at 60x60 / 120x120, absent on odd meshes, which have no edge line). Treating
+  !!       the pair as degenerate there, as at an exact degeneracy, makes even and odd meshes agree (GeS 1-3%,
+  !!       m_y-forbidden content 0.7-1.3% at 120..251) and also removes a 1/N line artefact of the same kind on
+  !!       field-split MoS2 (Gamma-M lines): 1.1-1.3% from the N -> infinity limit at 90..250, where the
+  !!       point-sampled term was 4.5-12.6% away.
+  subroutine get_shift_intens_cov(nb, nw, e, v, rg, lab, sv, wp, eta2, sig, svw, nexact, vfl, nvalley)
   implicit none
   integer,    intent(in)    :: nb, nw, lab(nb)
   real*8,     intent(in)    :: e(nb), sv(3,3,nb,nb), wp(nw), eta2
@@ -493,6 +544,8 @@ module sigma_second_sp
   complex*16, intent(inout) :: sig(3,3,3,nw)
   real*8,     intent(inout) :: svw(3,3,nw)
   integer,    intent(inout) :: nexact
+  real*8,     intent(in)    :: vfl(nb,nb)
+  integer,    intent(inout) :: nvalley
   complex*16 :: r(3,nb,nb), z(3,3,3)
   real*8 :: Isym(3,3,3), G1(3,3,3), G2(3,3,3), dl(nw), d2(nw), pref, x1, x2
   real*8 :: ew(nb)          ! energies used in the lineshapes: numerically degenerate groups at their mean
@@ -559,6 +612,9 @@ module sigma_second_sp
       if (abs(ew(n) - ew(l)) < cov_exact_tol) then
         nexact = nexact + 1; cycle
       end if
+      if (abs(ew(n) - ew(l)) < valley_ratio*vfl(n,l)) then
+        nvalley = nvalley + 1; cycle
+      end if
       do m = 1, nv_ex
         call gc(n, l, m, G1); call gc(l, n, m, G2)
         x1 = ew(n) - ew(m); x2 = ew(l) - ew(m)
@@ -573,6 +629,9 @@ module sigma_second_sp
       if (lab(l) /= lab(m)) cycle
       if (abs(ew(l) - ew(m)) < cov_exact_tol) then
         nexact = nexact + 1; cycle
+      end if
+      if (abs(ew(l) - ew(m)) < valley_ratio*vfl(l,m)) then
+        nvalley = nvalley + 1; cycle
       end if
       do n = nv_ex + 1, nb
         call gv(n, l, m, G1); call gv(n, m, l, G2)

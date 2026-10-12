@@ -26,12 +26,17 @@ module ome_sp
    ! every neighbour eigenbasis is parallel-transported BLOCK-wise (unitary/polar part of the block overlap)
    ! and r^{c;a} = d_a r^c - i [xi^a_B, r^c], with xi_B the intra-block (non-Abelian) Wannier-centre
    ! connection. Built from eigensystems WITHOUT the Eq. (A4) rotation (the lineshape term in
-   ! get_shift_intens_cov needs the energy eigenbasis). Results are insensitive to cov_tol over 1-30 meV
-   ! (MoS2: identical for 1, 3, 10 and 30 meV).
-   real(8), parameter :: cov_tol = 1.1d-4                  ! Hartree (3 meV)
+   ! get_shift_intens_cov needs the energy eigenbasis). Results are insensitive to cov_tol over 1-30 meV on
+   ! MoS2 (identical for 1, 3, 10 and 30 meV). 30 meV, because band pairs whose degeneracy is protected by a
+   ! glide or screw axis on the zone boundary (GeS, SnTe: Pmn2_1) are split by up to ~20 meV in a Wannier fit;
+   ! inside one block their near-degeneracy is handled covariantly instead of through a per-band derivative.
+   real(8), parameter :: cov_tol = 1.1d-3                  ! Hartree (30 meV)
    ! pairs closer than this are degenerate to numerical precision (see get_shift_intens_cov); also the
    ! grouping used by the block scramble test hook
    real(8), parameter :: cov_exact_tol = 1.0d-6           ! Hartree (27 ueV)
+   ! a split pair counts as degenerate where its splitting is below this fraction of its splitting at both
+   ! neighbouring mesh points along some axis (an unresolved minimum; see get_shift_intens_cov)
+   real(8), parameter :: valley_ratio = 0.3d0
    complex*16, allocatable, save :: cov_rgen(:,:,:,:,:)   ! (npointstotal, a, c, i, j): r^{c;a}_ij, window
    complex*16, allocatable, save :: cov_vraw(:,:,:,:)     ! (npointstotal, c, i, j): v^c_ij, eigenbasis, window
    integer,    allocatable, save :: cov_blk(:,:)          ! (npointstotal, i): block label of window band i

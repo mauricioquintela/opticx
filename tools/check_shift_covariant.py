@@ -21,6 +21,15 @@ Covariant single-particle SHG / rectification (Sp_method = covariant, the defaul
   * MoS2: Response = shg C3 < 2%, D3h ratios within 2% of -1 (measured 0.62%, -1.001, -1.002); unchanged by
     OPTICX_GAUGE_TEST (1e-8) and OPTICX_BLOCK_SCRAMBLE (1e-5, measured 9.6e-8); SENSITIVITY: Sp_method = per_band
     breaks C3 by > 50% on the same grid (measured 82%).
+GeS (wannier90_files_input/GeS_wannier_04062024_tb.dat, bands 17-24, Nfermi 20; point group mm2 with a glide plane,
+whose zone-edge band pairs the Wannier fit splits by 0.1-20 meV; an even mesh contains that edge line):
+  * even 80x80: m_y-forbidden share of the whole tensor < 3% (measured 1.8%) and forbidden xxz < 0.5 x allowed xxx
+    (1.3 vs 10.0);
+  * even 80x80 = odd 81x81 (no edge line) for xxx, xyy, yxy within 15% (1.9 / 8.8 / 5.2%);
+  * validated: the previous build fails all 6 GeS checks (forbidden share 24.6%, xxz 336 vs xxx 33, even/odd 260-1990%);
+  * the log reports the pairs handled by the unresolved-minimum rule.
+  The covariant lineshape term divides by a pair's splitting; on the edge line it used to give a forbidden spike
+  that falls only as 1/N (xxz 448 / 224 at 60x60 / 120x120, 25% of the tensor forbidden).
 """
 import argparse, os, shutil, subprocess, sys
 import numpy as np
@@ -35,7 +44,7 @@ INP = """# Periodic dimensions
 # Xatu_interface
 false
 # Ncells
-30
+{ncells}
 # Bandlist
 {bands}
 # Nfermi
@@ -74,10 +83,10 @@ def main():
         print(('  PASS   ' if ok else '  FAIL   ') + label + ('   ' + msg if msg else ''))
         nfail += 0 if ok else 1
 
-    def run(tag, tb, bands, nf, resp, ev, env_extra=None, keep_omesp=False, extra=''):
+    def run(tag, tb, bands, nf, resp, ev, env_extra=None, keep_omesp=False, extra='', ncells=30):
         d = os.path.join(work, tag); os.makedirs(d)
         name = f'{tag}.txt'                                   # descriptive input name (htop)
-        open(os.path.join(d, name), 'w').write(INP.format(tb=tb, bands=bands, nf=nf, resp=resp, ev=ev) + extra)
+        open(os.path.join(d, name), 'w').write(INP.format(tb=tb, bands=bands, nf=nf, resp=resp, ev=ev, ncells=ncells) + extra)
         env = dict(os.environ)
         for k in ('OPTICX_GAUGE_TEST', 'OPTICX_BLOCK_SCRAMBLE'):
             env.pop(k, None)
@@ -181,6 +190,28 @@ def main():
     e = rel(lshg(m2), G); check('MoS2 shg unchanged by OPTICX_GAUGE_TEST', e < 1e-8, f'{e:.2e} (tol 1e-8)')
     m3, _ = run('MoS2_N30_shg_block', mos2, '-1 0 1 2', 26, 'shg', MSEV, {'OPTICX_BLOCK_SCRAMBLE': '1'})
     e = rel(lshg(m3), G); check('MoS2 shg unchanged by OPTICX_BLOCK_SCRAMBLE', e < 1e-5, f'{e:.2e} (tol 1e-5)')
+
+    print('\nshift_covariant on GeS (mm2, glide plane): zone-edge line on an even mesh')
+    ges = os.path.join(root, 'wannier90_files_input', 'GeS_wannier_04062024_tb.dat')
+    if not os.path.exists(ges):
+        print(f'  SKIP   GeS checks: {ges} not found')
+    else:
+        GB, GEV = '-3 -2 -1 0 1 2 3 4', '2.5 6.0 0.05 351'
+        full = lambda d: np.loadtxt([os.path.join(d, f) for f in os.listdir(d) if f.startswith('shift_sp_')][0])[:, 1:28]
+        lab = [a + b + c for a in 'xyz' for b in 'xyz' for c in 'xyz']
+        def odd_y(T):
+            n2 = (T ** 2).sum(0)
+            return np.sqrt(sum(n2[i] for i, l in enumerate(lab) if l.count('y') % 2) / n2.sum())
+        ge, lg = run('GeS_N80_shift', ges, GB, 20, 'shift', GEV, ncells=80)
+        go, _ = run('GeS_N81_shift', ges, GB, 20, 'shift', GEV, ncells=81)
+        E, O = full(ge), full(go)
+        check('GeS  log reports pairs at an unresolved minimum of their splitting', 'unresolved minimum' in lg)
+        r = odd_y(E); check('GeS  even 80x80: m_y-forbidden share of the tensor', r < 0.03, f'{100 * r:.2f}% (max 3%; 24.6% before the fix)')
+        xxz, xxx = abs(E[:, lab.index('xxz')]).max(), abs(E[:, lab.index('xxx')]).max()
+        check('GeS  even 80x80: forbidden xxz well below allowed xxx', xxz < 0.5 * xxx, f'{xxz:.2f} vs {xxx:.2f} (max 0.5x; 336 vs 33 before the fix)')
+        for c in ('xxx', 'xyy', 'yxy'):
+            i = lab.index(c); e = abs(E[:, i] - O[:, i]).max() / abs(O[:, i]).max()
+            check(f'GeS  {c}: even 80x80 = odd 81x81', e < 0.15, f'{100 * e:.1f}% (max 15%; 260-1990% before the fix)')
 
     if nfail:
         print(f'\nFAILED: {nfail} check(s)'); sys.exit(1)
