@@ -105,12 +105,16 @@ module sigma_first_ex
     
     complex*16 :: vme_ex
     complex*16 :: skubo_ex_int, sigma_w_ex
+    ! reduction variable: allocatable, so each thread's private copy is on the heap (a reduction over the
+    ! explicit-shape dummy put 144 nw bytes on every thread's stack: 5.8 MB at nw = 40000)
+    complex*16, allocatable :: sig_acc(:,:,:)
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!	  
     skubo_ex_int=0.0d0
-    sigma_w_ex=0.0d0
+    allocate(sig_acc(3,3,nw))
+    sig_acc=0.0d0
     !$omp parallel do default(none) schedule(static) private(nn,nj,njp,iw,skubo_ex_int,delta_n_ex) &
     !$omp   shared(npointstotal, norb_ex_cut, nw, vcell, e_ex, vme_ex, wp, eta1, broadening_type_text) &
-    !$omp   reduction(+:sigma_w_ex)
+    !$omp   reduction(+:sig_acc)
     do nn=1,norb_ex_cut
       do nj=1,3
         do njp=1,3
@@ -136,12 +140,13 @@ module sigma_first_ex
             end if
             
             !sigma_w
-            sigma_w_ex(nj,njp,iw)=sigma_w_ex(nj,njp,iw)+skubo_ex_int*delta_n_ex
+            sig_acc(nj,njp,iw)=sig_acc(nj,njp,iw)+skubo_ex_int*delta_n_ex
           
           end do
         end do
       end do
     end do  
+    sigma_w_ex = sig_acc
 
   end subroutine get_kubo_intens_ex
 

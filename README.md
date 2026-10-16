@@ -18,9 +18,9 @@ conductivities: absorbance, second-harmonic generation, the electro-optic (Pocke
 rectification and the shift current. All of the second-order processes are branches of one general
 two-frequency response σ(ω₁+ω₂; ω₁, ω₂), which can also be scanned as a full two-dimensional map.
 
-<p align="center">
+<!--<p align="center">
   <img src="hbn_opticx_example.png" width="90%" height="90%">
-</p>
+</p>-->
 
 The theory behind the code, the conventions it follows and usage examples are described in the
 [documentation](#documentation). The implementation follows
@@ -66,6 +66,14 @@ LIBS   = -L/opt/homebrew/opt/openblas/lib -lopenblas -fopenmp -lgfortran
 The Makefile also carries an MKL variant of `LIBS`; uncomment it in place of the OpenBLAS one if you
 would rather link against MKL.
 
+### HDF5 (Xatu archives)
+
+To read Xatu's HDF5 exciton archives (`xatu -H`) as well as its `.eigval`/`.states` text files, build with
+the HDF5 Fortran library (`libhdf5-dev`); `make clean` when switching:
+```
+make HDF5=1
+```
+
 ## Tests
 
 The test suite needs Python 3 with NumPy, and matplotlib if you want the diagnostic plots:
@@ -84,6 +92,7 @@ make check_tb_hermiticity                   # model-file Hermiticity check and r
 make check_bandlist_guard                   # band-window report and unusual-Bandlist warning
 make check_bands                            # band structure along a k-path (Kpath, Response = bands)
 make check_ome_cache check_a4_basis_guard   # matrix-element cache and basis guards
+make check_xatu_h5                          # Xatu HDF5 archive input (HDF5=1 build, h5py)
 ```
 Each prints `ALL TESTS PASSED` or `ALL CHECKS PASSED`.
 

@@ -8,6 +8,7 @@ module parser_optics_xatu_dim
       ndim,npointstotal_sq, & !variables
       iflag_xatu,nf,nband_index,norb_ex_cut, & 
       cache_ome_read,iflag_ome_ex_text,iflag_write_exk,second_order_response, & !for the fk_ex deferral, below
+      response_text, & !Response = bands needs no valence/conduction split
       read_line_numbers_int !subroutine
   use xatu_h5, only: xatu_h5_info,xatu_h5_header,xatu_h5_energies,xatu_h5_kpoints,xatu_h5_states
   implicit none
@@ -85,6 +86,19 @@ subroutine get_optics_xatu_dim()
   nc_ex=nband_ex-nv_ex
 
   call check_band_window(nband_index)
+
+  ! An optical response needs at least one occupied and one empty band in the window. Without a conduction band
+  ! the excitonic routines index empty arrays (with -fcheck=all a bounds error deep in ome_ex, otherwise silent
+  ! garbage); without a valence band every response is zero. Response = bands only draws the window.
+  if (trim(response_text) /= 'bands' .and. (nv_ex == 0 .or. nc_ex == 0)) then
+    if (nc_ex == 0) write(*,'(a,i0,a)') ' ERROR (Bandlist/Nfermi): no band of the window lies above the Fermi level (Nfermi = ', &
+                                         nf, '), so there is no conduction band.'
+    if (nv_ex == 0) write(*,'(a,i0,a)') ' ERROR (Bandlist/Nfermi): no band of the window lies at or below the Fermi level (Nfermi = ', &
+                                         nf, '), so there is no valence band.'
+    write(*,'(a)') '        Offsets are counted from Nfermi (0 = top valence band, 1 = bottom conduction band); check Nfermi'
+    write(*,'(a)') '        and Bandlist (e.g. -1 0 1 2).'
+    stop 1
+  end if
 
   !change syntax for band counting
   !XATU: ...-1 0 1 2... to explicit band count
@@ -304,6 +318,28 @@ subroutine get_exciton_dim()
   close(iounit_bands)	 
 
   nband_ex_aux=nband_ex_aux1+nband_ex_aux2
+
+  ! The .states file says which bands Xatu took as valence (column 4) and as conduction (column 5), counted from 0.
+  ! OptiX places them with Nfermi (offset = band - Nfermi + 1), so Nfermi must put every Xatu valence band at or
+  ! below the Fermi level and every Xatu conduction band above it: maxval(v) + 1 <= Nfermi <= minval(c). Any other
+  ! value mislabels bands (e.g. Nfermi = 46 on a Xatu run with filling 26 turned all four bands into valence bands)
+  ! and the run fails later, or not at all, with wrong numbers. The HDF5 archive path checks Xatu's filling directly.
+  if (maxval(nband_index_aux1(1:nband_ex_aux1)) + 1 > nf .or. minval(nband_index_aux2(1:nband_ex_aux2)) < nf) then
+    write(*,'(a)') ' ERROR (Nfermi): Nfermi does not match the band window of the Xatu .states file.'
+    write(*,'(a,*(1x,i0))') '        Xatu valence bands (counted from 0):   ', nband_index_aux1(1:nband_ex_aux1)
+    write(*,'(a,*(1x,i0))') '        Xatu conduction bands (counted from 0):', nband_index_aux2(1:nband_ex_aux2)
+    write(*,'(a,i0,a,*(1x,i0))') '        With Nfermi = ', nf, ' they sit at offsets', &
+         nband_index_aux1(1:nband_ex_aux1) - nf + 1, nband_index_aux2(1:nband_ex_aux2) - nf + 1
+    if (maxval(nband_index_aux1(1:nband_ex_aux1)) + 1 == minval(nband_index_aux2(1:nband_ex_aux2))) then
+      write(*,'(a,i0,a)') '        Set Nfermi = ', maxval(nband_index_aux1(1:nband_ex_aux1)) + 1, &
+           ', the number of filled bands Xatu used (its filling, e.g. xatu --w90 N).'
+    else
+      write(*,'(a,i0,a,i0,a)') '        Nfermi must lie between ', maxval(nband_index_aux1(1:nband_ex_aux1)) + 1, &
+           ' and ', minval(nband_index_aux2(1:nband_ex_aux2)), &
+           '; normally it is the first, the number of filled bands Xatu used (its filling).'
+    end if
+    stop 1
+  end if
   allocate(nband_index(nband_ex_aux))
   do i=1,nband_ex_aux1
     nband_index(i)=nband_index_aux1(i)-nf+1

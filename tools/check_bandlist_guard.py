@@ -13,6 +13,12 @@ Checks (MoS2 tb model, 6x6 mesh, linear response only, a few seconds; hBN Xatu f
 Exciton_cutoff is optional: without it every exciton in the Xatu files is used (the count is the third line of
 the .eigval file; the first line of the .states file is the basis size, not the count). A negative value stops.
   no Exciton_cutoff: 'using all 900 excitons' on hBN_N30;  Exciton_cutoff = -5: stops with a message.
+Nfermi must match the band window. The .states file names Xatu's valence and conduction bands (counted from 0), so a
+wrong Nfermi stops at once and names the right value (Nfermi = 46 on a Xatu run with filling 26 used to turn all
+four bands into valence bands and fail later in a bounds check, or silently without -fcheck). A window without a
+conduction band or without a valence band stops too, except for Response = bands.
+  hBN_N30 with Nfermi = 2 and 0: stop naming Nfermi = 1, nothing computed;  MoS2 Bandlist '-1 0' and '1 2':
+  stop (no conduction / no valence band);  '-1 0' with Response = bands: runs.
 
 Usage: python3 tools/check_bandlist_guard.py --opticx bin/opticx --root . --workdir bin/check_bandlist_guard
 """
@@ -112,6 +118,20 @@ def main():
           rc == 0 and 'Exciton_cutoff not given: using all 900 excitons' in log, f'rc={rc}')
     rc, log = run('hBN_N30_xatu_cutneg', EX.format(tb=hbn, eig=eig, sta=sta, cutoff='# Exciton_cutoff\n-5'))
     check('Exciton_cutoff = -5: stops with a message', rc != 0 and 'Exciton_cutoff must be positive' in log, f'rc={rc}')
+    print('\nNfermi against the band window\n')
+    ex1 = EX.format(tb=hbn, eig=eig, sta=sta, cutoff='# Exciton_cutoff\n50')
+    for tag, nfv in (('hBN_N30_nfermi2', 2), ('hBN_N30_nfermi0', 0)):
+        rc, log = run(tag, ex1.replace('# Nfermi\n1\n', f'# Nfermi\n{nfv}\n'))
+        check(f'Xatu input, Nfermi = {nfv} (Xatu filling 1): stops, names Nfermi = 1, nothing computed',
+              rc != 0 and 'ERROR (Nfermi)' in log and 'Set Nfermi = 1,' in log and 'Entering ome' not in log, f'rc={rc}')
+    for tag, bands, what in (('MoS2_noconduction', '-1 0', 'no conduction band'),
+                             ('MoS2_novalence', '1 2', 'no valence band')):
+        rc, log = run(tag, SP.format(tb=mos2, bands=bands))
+        check(f"Bandlist '{bands}': stops ({what}), nothing computed",
+              rc != 0 and what in log and 'Entering ome' not in log, f'rc={rc}')
+    rc, log = run('MoS2_noconduction_bands', SP.format(tb=mos2, bands='-1 0').replace('# Response\nabsorbance', '# Response\nbands'))
+    check("Bandlist '-1 0' with Response = bands: runs (a band plot needs no conduction band)",
+          rc == 0 and 'ERROR' not in log, f'rc={rc}')
     if nfail:
         print(f'\nFAILED: {nfail} check(s)'); sys.exit(1)
     print('\nALL CHECKS PASSED')

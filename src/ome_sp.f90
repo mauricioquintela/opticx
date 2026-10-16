@@ -228,14 +228,18 @@ subroutine get_ome_sp(iflag_norder)
       complex*16, allocatable :: sderkernel(:,:,:), hderkernel(:,:,:)
       complex*16, allocatable :: akernel(:,:,:)
 
-      real(8)    :: e(norb)
-      complex*16 :: hk_ev(norb,norb)
-      complex*16 :: vme(norb,norb,3)
+      ! Work arrays of the k-loop: allocatable, allocated inside the parallel region. As explicit-shape
+      ! (automatic) arrays they were PRIVATE copies, which gfortran puts on each thread's stack (the main
+      ! thread's included): ~11 MB per thread at norb = 178 (MoSe2 with SOC), a segmentation fault with the
+      ! default 8 MB stack. Allocatable private arrays are on the heap.
+      real(8),    allocatable :: e(:)
+      complex*16, allocatable :: hk_ev(:,:)
+      complex*16, allocatable :: vme(:,:,:)
 
-      complex*16 :: abc(norb,norb,3)
-      real(8)    :: shift_vector(norb,norb,3,3)
-      complex*16 :: berry_eigen1(norb,norb,3), berry_eigen2(norb,norb,3)
-      complex*16 :: berry_eigen(norb,norb,3)
+      complex*16, allocatable :: abc(:,:,:)
+      real(8),    allocatable :: shift_vector(:,:,:,:)
+      complex*16, allocatable :: berry_eigen1(:,:,:), berry_eigen2(:,:,:)
+      complex*16, allocatable :: berry_eigen(:,:,:)
 
       integer :: kmoment
 
@@ -250,7 +254,7 @@ subroutine get_ome_sp(iflag_norder)
       ! both the "main" call below and the 7 calls inside
       ! get_berry_eigen_fourpoint.
       complex*16, allocatable :: M1(:,:), T1(:,:)
-      complex*16 :: Wfull(norb,norb)   ! total basis change at this k (Eq. A4 rotation + rephasing)
+      complex*16, allocatable :: Wfull(:,:)   ! total basis change at this k (Eq. A4 rotation + rephasing)
       complex*16 :: Wblk_chk(nband_ex,nband_ex)
 
       real(8), allocatable :: vme_der_phase(:,:,:,:)
@@ -400,6 +404,9 @@ subroutine get_ome_sp(iflag_norder)
       allocate(hk_ev_neigh(norb,norb,7), vme_neigh(norb,norb,3,7))
       allocate(vme_der_phase(norb,norb,3,3))
       allocate(M1(norb,norb), T1(norb,norb))                    ! NEW
+      allocate(e(norb), hk_ev(norb,norb), vme(norb,norb,3), Wfull(norb,norb))
+      allocate(abc(norb,norb,3), shift_vector(norb,norb,3,3))
+      allocate(berry_eigen1(norb,norb,3), berry_eigen2(norb,norb,3), berry_eigen(norb,norb,3))
       if (cov_on) allocate(rgen_k(norb,norb,3,3), vraw_k(norb,norb,3), lab_k(norb))
       if (shgcov_on) allocate(Tn_k(norb,norb,6), rr_k(norb,norb,3,7), ee_k(norb,7), xi_k(norb,norb,3))
 
@@ -547,6 +554,7 @@ subroutine get_ome_sp(iflag_norder)
       deallocate(gen_der,vme_der,vme_abs_der,gd1,gd2,gd3,hk_ev_neigh,vme_neigh,vme_der_phase)
       deallocate(vme_der_pt)
       deallocate(M1,T1)                                          ! NEW
+      deallocate(e, hk_ev, vme, Wfull, abc, shift_vector, berry_eigen1, berry_eigen2, berry_eigen)
       if (cov_on) deallocate(rgen_k, vraw_k, lab_k)
       if (shgcov_on) deallocate(Tn_k, rr_k, ee_k, xi_k)
       !$OMP END PARALLEL

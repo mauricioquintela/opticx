@@ -28,7 +28,9 @@ module sigma_first_sp
     ! frequency grid and conductivity tensor
     real(8)     :: wp(nw)
     real(8)     :: eta1
-    complex(8) :: sigma_w_sp(3, 3, nw)
+    ! allocatable: the REDUCTION below gives every thread a private copy, which gfortran puts on the
+    ! thread's stack for an explicit-shape array (144 nw bytes, 5.8 MB at nw = 40000)
+    complex(8), allocatable :: sigma_w_sp(:,:,:)
 
     ! Per-thread scratch arrays (listed in PRIVATE clause below)
     real(8)     :: e_nband_local(nband_ex)
@@ -36,6 +38,7 @@ module sigma_first_sp
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     write(*,*) '8. Entering sigma_first_sp'
     !initialize sp arrays
+    allocate(sigma_w_sp(3,3,nw))
     vme_ex_band=0.0d0
     ek=0.0d0   
     !read optical matrix elements from file
