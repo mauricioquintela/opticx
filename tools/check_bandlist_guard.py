@@ -19,6 +19,11 @@ four bands into valence bands and fail later in a bounds check, or silently with
 conduction band or without a valence band stops too, except for Response = bands.
   hBN_N30 with Nfermi = 2 and 0: stop naming Nfermi = 1, nothing computed;  MoS2 Bandlist '-1 0' and '1 2':
   stop (no conduction / no valence band);  '-1 0' with Response = bands: runs.
+Response = bands with Xatu input reads no exciton envelopes (a complete basis of 64800 excitons is 67 GB):
+  hBN_N30, every exciton: bands written, envelopes skipped (logged).
+The input file itself: no argument stops with a usage line; a missing input file stops and is NOT created (open's
+default status used to create it empty); an input path of 120+ characters works (paths were cut at 100 characters);
+a path over 1000 characters stops with a message.
 
 Usage: python3 tools/check_bandlist_guard.py --opticx bin/opticx --root . --workdir bin/check_bandlist_guard
 """
@@ -132,6 +137,33 @@ def main():
     rc, log = run('MoS2_noconduction_bands', SP.format(tb=mos2, bands='-1 0').replace('# Response\nabsorbance', '# Response\nbands'))
     check("Bandlist '-1 0' with Response = bands: runs (a band plot needs no conduction band)",
           rc == 0 and 'ERROR' not in log, f'rc={rc}')
+    rc, log = run('hBN_N30_xatu_bandsonly', EX.format(tb=hbn, eig=eig, sta=sta, cutoff='').replace(
+        '# Response\nabsorbance', '# Response\nbands'))
+    wrote = os.path.exists(os.path.join(work, 'hBN_N30_xatu_bandsonly', 'bands_hBN.dat'))
+    check('Xatu input with Response = bands: band structure written, exciton envelopes neither allocated nor read',
+          rc == 0 and wrote and 'Exciton envelopes not read: Response = bands' in log, f'rc={rc}, bands file {wrote}')
+    print('\nThe input file argument\n')
+    d = os.path.join(work, 'input_path'); os.makedirs(d, exist_ok=True)
+
+    def run_args(args):
+        r = subprocess.run([opticx] + args, cwd=d, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return r.returncode, r.stdout.decode('utf-8', 'replace')
+    rc, log = run_args([])
+    check('no input file given: stops with a usage line', rc != 0 and 'no input file given' in log, f'rc={rc}')
+    missing = os.path.join(d, 'no_such_input.txt')
+    if os.path.exists(missing):
+        os.remove(missing)
+    rc, log = run_args([missing])
+    check('missing input file: stops naming it, and the file is not created',
+          rc != 0 and 'cannot open the input file' in log and not os.path.exists(missing), f'rc={rc}')
+    longdir = os.path.join(d, 'a_directory_name_long_enough_to_push_the_input_path_beyond_one_hundred_characters')
+    os.makedirs(longdir, exist_ok=True)
+    longinp = os.path.join(longdir, 'MoS2_long_path.txt')
+    open(longinp, 'w').write(SP.format(tb=mos2, bands='-1 0 1 2'))
+    rc, log = run_args([longinp])
+    check(f'input path of {len(longinp)} characters (> 100): runs', rc == 0 and 'Opticx calculation ended' in log, f'rc={rc}')
+    rc, log = run_args(['x' * 1100])
+    check('input path over 1000 characters: stops with a message', rc != 0 and 'longer than 1000 characters' in log, f'rc={rc}')
     if nfail:
         print(f'\nFAILED: {nfail} check(s)'); sys.exit(1)
     print('\nALL CHECKS PASSED')

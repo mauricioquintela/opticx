@@ -9,6 +9,7 @@ module parser_optics_xatu_dim
       iflag_xatu,nf,nband_index,norb_ex_cut, & 
       cache_ome_read,iflag_ome_ex_text,iflag_write_exk,second_order_response, & !for the fk_ex deferral, below
       response_text, & !Response = bands needs no valence/conduction split
+      scissor_ev, & !checked against the Xatu archive
       read_line_numbers_int !subroutine
   use xatu_h5, only: xatu_h5_info,xatu_h5_header,xatu_h5_energies,xatu_h5_kpoints,xatu_h5_states
   implicit none
@@ -69,6 +70,9 @@ subroutine get_optics_xatu_dim()
   if (iflag_xatu .eqv. .true.) then
     call get_exciton_dim()
     !nband_ex=nc_ex+nv_ex
+    if (.not. iflag_xatu_h5 .and. scissor_ev /= 0.0d0) write(*,'(a,f10.5,a)') &
+      '    NOTE: Xatu text files do not record a scissor: cannot check that the excitons were computed with Scissor = ', &
+      scissor_ev, ' eV.'
   else
     !number of total k-points
     if (ndim==1) npointstotal=npointstotal_sq
@@ -122,7 +126,13 @@ subroutine get_optics_xatu_dim()
   allocate (rkyvector(npointstotal))
   allocate (rkzvector(npointstotal))
   allocate (e_ex(norb_ex_cut))
-  allocate (fk_ex(norb_ex,norb_ex_cut))
+  ! Response = bands uses no exciton envelopes: allocate none (norb_ex x Exciton_cutoff complex numbers, 67 GB
+  ! for a complete basis of 64800 excitons) and skip their read in get_exciton_data.
+  if (trim(response_text) == 'bands') then
+    allocate (fk_ex(norb_ex,0))
+  else
+    allocate (fk_ex(norb_ex,norb_ex_cut))
+  end if
   
   !get reciprocal lattice vectors
   call get_reciprocal_vectors()  
@@ -443,6 +453,20 @@ subroutine get_exciton_dim_h5()
     write(*,*) '       Set Nfermi to match the Xatu filling, or rerun Xatu with the intended one.'
     stop 1
   end if
+  ! Scissor: Xatu adds its scissor to every BSE transition energy, so the exciton energies only match the
+  ! single-particle quantities if both used the same shift.
+  if (info%has_scissor) then
+    if (abs(info%scissor - scissor_ev) > 1.0d-6) then
+      write(*,'(a,f10.5,a,f10.5,a)') ' ERROR (get_exciton_dim): Scissor = ', scissor_ev, &
+           ' eV but the Xatu run that wrote the archive used scissor = ', info%scissor, ' eV.'
+      write(*,*) '       The exciton energies would not match the single-particle shift; set Scissor to the Xatu value.'
+      stop 1
+    end if
+    if (info%scissor /= 0.0d0) write(*,'(a,f10.5,a)') '    Scissor = ', scissor_ev, ' eV, as in the Xatu archive'
+  else if (scissor_ev /= 0.0d0) then
+    write(*,'(a,f10.5,a)') '    NOTE: the archive does not record a scissor (converted from text output?): cannot check'// &
+         ' that the excitons were computed with Scissor = ', scissor_ev, ' eV.'
+  end if
   ! opticx differentiates the envelopes between mesh neighbours, so it needs Xatu's full mesh.
   if (info%submesh /= 1 .or. info%nk /= info%ncells**ndim) then
     write(*,'(a,i0,a,i0,a,i0,a,i0)') ' ERROR (get_exciton_dim): the archive holds ', info%nk, &
@@ -670,7 +694,10 @@ subroutine get_exciton_data()
   ! and only if the cache misses. The predicate is deliberately coarse -- it asks whether a hit is
   ! POSSIBLE, not whether it will happen -- because a wrong guess costs only the same read, later.
   ! OME_ex = none on a second-order run takes everything from the cache (a miss stops), so it never needs them.
-  if (.not. (cache_ome_read .and. .not. iflag_write_exk .and. (iflag_ome_ex_text == 'nonlinear' .or. &
+  ! Response = bands stops after the band structure and never needs them either.
+  if (trim(response_text) == 'bands') then
+    write(*,*) '   Exciton envelopes not read: Response = bands'
+  else if (.not. (cache_ome_read .and. .not. iflag_write_exk .and. (iflag_ome_ex_text == 'nonlinear' .or. &
              (iflag_ome_ex_text == 'none' .and. second_order_response())))) then
     call load_fk_ex()
   else

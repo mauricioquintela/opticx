@@ -23,6 +23,7 @@ program test_shg_real_data
   use bands,                  only: get_energy_bands
   use ome,                    only: get_ome
   use ome_ex,                 only: xme_ex, vme_ex, xme_ex_inter, vme_ex_inter, inter_terms_ready
+  use constants_math,         only: sigma2_au_to_si
   use sigma_second_sp,        only: initialize_sigma_second_arrays
   use sigma_second_ex,        only: get_shg_intens_ex_matrix, get_shg_intens_ex_matrix_methodB, &
                                     get_shg_kernel_ex_static_methodB, get_shg_kernel_ex_freq_methodB
@@ -119,8 +120,8 @@ program test_shg_real_data
               maxval(abs(sAs-sBs))/maxval(abs(sBs)), tol_A_vs_B_full)
 
   ! spectra for tools/plot_test_outputs.py (uA nm/V^2, hbar*omega axis -- the FUNDAMENTAL, matching
-  ! opticx's own shg_*_lengthgauge files since the 2026-09-24 axis change, HANDOFF 8.33)
-  feps = 6.623618d-03*1.0d+06*(27.211386d0**(-2))*5.291772d-11*1.0d+09
+  ! opticx's own shg_*_lengthgauge files since the 2026-09-24 axis change)
+  feps = sigma2_au_to_si   ! includes e^3 = -1 (e = -|e|), same as the shipped output files
   open(77, file='shg_real_data_spectra.dat')
   write(77,'(A)') '# kind: shg_real_data'
   write(77,'(A)') '# columns: Ew_eV xxx_B_re xxx_B_im xxx_A_Pi_re xxx_A_Pi_im xxx_A_P_re xxx_A_P_im xyy_B_re xyy_B_im xyy_A_Pi_re xyy_A_Pi_im'

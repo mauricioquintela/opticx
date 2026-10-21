@@ -17,6 +17,7 @@ module parser_input_file
   public :: cache_ome_read, cache_ome_write
   public :: xnm_covariant, basis_repair
   public :: sp_covariant
+  public :: scissor_ev, scissor_r_unchanged, scissor_mode_text
   public :: build_freq_pairs
   public :: iflag_xatu
   public :: iflag_xatu_h5, xatu_h5_filepath_in
@@ -36,7 +37,7 @@ module parser_input_file
   public :: second_order_response
 
   character(len=1000) :: material_name_in
-  character(len=100) :: filename_input
+  character(len=1000) :: filename_input
   character(len=100) :: iflag_xatu_text
   character(len=100) :: iflag_ome_sp_text
   character(len=100) :: iflag_ome_ex_text
@@ -90,6 +91,14 @@ module parser_input_file
   ! (shift -> shift_shiftvector; Taghizadeh 2017 Eq. A3a for the others), kept for comparison.
   logical :: sp_covariant = .true.
   character(len=100) :: sp_method_text = 'covariant'
+  ! Scissor (eV): rigid shift of every conduction band, E_c -> E_c + Scissor, applied to the single-particle
+  ! quantities at the response stage (the .omesp keeps the unshifted model). Scissor_mode chooses what stays fixed:
+  ! r_unchanged (DEFAULT): interband position elements r_cv kept, velocities v_cv -> v_cv (w_cv + Scissor)/w_cv
+  ! (Levine & Allan, PRL 63, 1719 (1989); Nastos et al., PRB 72, 045223 (2005)); v_unchanged: velocities kept,
+  ! r_cv -> r_cv w_cv/(w_cv + Scissor) (the convention of Xatu's own Kubo conductivity).
+  real(8) :: scissor_ev = 0.0d0
+  logical :: scissor_r_unchanged = .true.
+  character(len=100) :: scissor_mode_text = 'r_unchanged'
   real(8) :: e1b = 0.0d0, e2b = 0.0d0
   integer :: nwb = 0
   logical :: two_freq_grid = .false.
@@ -190,8 +199,24 @@ module parser_input_file
       broadening_type_text = 'lorentzian'
       iflag_write_exk_text = 'false'
       
-      call get_command_argument(1,filename_input)
-      open(newunit=iounit10,file=adjustl(filename_input))
+      ! The input file is the first command-line argument. A path longer than filename_input used to be cut
+      ! silently (it was 100 characters: a longer path opened its first 100 characters, e.g. a directory), and
+      ! open's default status 'unknown' turned a missing or misspelled file into a new empty one.
+      if (command_argument_count() < 1) then
+        write(*,'(a)') ' ERROR: no input file given. Usage: opticx <input file>'
+        stop 1
+      end if
+      call get_command_argument(1, filename_input, status=ios)
+      if (ios /= 0) then
+        write(*,'(a,i0,a)') ' ERROR: the input file path is longer than ', len(filename_input), &
+                            ' characters; use a shorter path (e.g. run from its directory).'
+        stop 1
+      end if
+      open(newunit=iounit10, file=trim(adjustl(filename_input)), status='old', action='read', iostat=ios)
+      if (ios /= 0) then
+        write(*,'(a)') ' ERROR: cannot open the input file '//trim(adjustl(filename_input))
+        stop 1
+      end if
       
       ! Read file sequentially and process parameters based on their labels
       do
@@ -361,6 +386,25 @@ module parser_input_file
                 write(*,*) '       Valid: covariant (default), per_band.'
                 stop 1
             end select
+          else if (index(param_name, 'Scissor_mode') > 0) then        ! before 'Scissor': substring match
+            read(iounit10,'(A)') scissor_mode_text
+            scissor_mode_text = to_lower(adjustl(scissor_mode_text))
+            select case (trim(scissor_mode_text))
+              case ('r_unchanged')
+                scissor_r_unchanged = .true.
+              case ('v_unchanged')
+                scissor_r_unchanged = .false.
+              case default
+                write(*,*) 'ERROR (parser_input_file): Scissor_mode = "'//trim(scissor_mode_text)//'" is not recognised.'
+                write(*,*) '       Valid: r_unchanged (default), v_unchanged.'
+                stop 1
+            end select
+          else if (index(param_name, 'Scissor') > 0) then
+            read(iounit10,*,iostat=ios) scissor_ev
+            if (ios /= 0) then
+              write(*,*) 'ERROR (parser_input_file): Scissor needs one number, the shift of the conduction bands in eV.'
+              stop 1
+            end if
           else if (index(param_name, 'Frequency_ratio') > 0) then
             read(iounit10,*) freq_ratio
           else if (index(param_name, 'Energy_variables') > 0) then

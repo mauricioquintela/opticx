@@ -1,8 +1,8 @@
 ! Symmetry checks on the GENERAL two-frequency second-order response, at frequency ratios other than
-! r = w_q/w_p = 1.  Motivation (HANDOFF 8.32, 8.42, 8.43): every defect found in these kernels so far has
+! r = w_q/w_p = 1.  Motivation: every defect found in these kernels so far has
 ! been invisible at r = 1, because there the (alpha,w_p)<->(beta,w_q) pair swap is the identity and the
 ! two field indices are interchangeable.  hBN is D3h, so sigma^xxx = -sigma^xyy = -sigma^yxy = -sigma^yyx
-! exactly; the residual on a 30x30 grid is k-derivative discretisation (~2%, CLAUDE.md).
+! exactly; the residual on a 30x30 grid is k-derivative discretisation (~2%, falling as 1/N^2).
 !
 ! NOTE on what is NOT tested here.  The RAW kernels are deliberately not symmetric under exchanging the
 ! two frequencies -- each is one ordering, and the pair average IS the symmetrisation.  Measured, the raw
@@ -55,15 +55,23 @@ program test_second_symmetry
   call get_second_intens_ex_methodB(nw, hwp, hwq, hw2, B2); call pairsym(B1, B2, symTwo)
   call check('r <-> 1/r  sym_{1/r}(a,b,c) = sym_r(a,c,b)', reldiff_t(symTwo, symHalf), 1.0d-10)
 
-  ! ---- r = -1, the DC branch with its own convention (HANDOFF 8.42): guards that fix -------------
-  call freqs(-1.0d0, .true., 1.0d0)
-  call get_second_intens_ex_methodA(nw, hwp, hwq, hw2, A1)
-  call pairsym(A1, A1, symA)                                  ! index-only, NO pair average
-  symA = cmplx(dble(symA), 0.0d0, 8)
-  call check('r = -1  DC branch D3h (guards 8.42)', d3h(symA), 5.0d-2)
-  call check('r = -1  DC branch Im sigma = 0 (Sipe)', maxval(abs(aimag(symA))), 1.0d-30)
+  ! ---- r = -1, rectification: causal, method A with term 3 on the bare current, both orderings ---------
+  ! The symmetrised tensor must obey the reality of the current (Re b<->c symmetric, Im antisymmetric),
+  ! D3h, and -- hBN being -6m2, where the injection current is forbidden -- a small antisymmetric Im.
+  ! Term 3 couples nearly degenerate exciton pairs directly, which amplifies the k-derivative
+  ! discretisation like the electro-optic branch: on hBN at eta = 0.05 eV the D3h residual is 6.6% / 3.1% /
+  ! 1.3% and the forbidden |Im|/|Re| 1.8% / 0.71% / 0.25% at 30x30 / 45x45 / 60x60 (all excitons), i.e.
+  ! falling as 1/N^2 or faster; this test's 100-exciton basis gives 5.9% and 3.65%. Asserted against
+  ! the r = 1 floor and at 5% so that a real defect (O(1)) still fails.
+  call freqs(-1.0d0, .false., 1.0d0)
+  call get_second_intens_ex_methodA(nw, hwp, hwq, hw2, A1, bare_term3=.true.)
+  call get_second_intens_ex_methodA(nw, hwq, hwp, hw2, A2, bare_term3=.true.); call pairsym(A1, A2, symA)
+  call check('r = -1  rectification: Re symmetric, Im antisymmetric in (b,c)', realitydefect(symA), 1.0d-10)
+  call check('r = -1  rectification D3h, relative to the r=1 floor', d3h(symA)/d3h_shg, 3.0d0)
+  call check('r = -1  rectification: injection forbidden in -6m2, |Im|/|Re|', &
+             maxval(abs(aimag(symA)))/maxval(abs(dble(symA))), 5.0d-2)
 
-  ! ---- r = 0, electro-optic (HANDOFF 8.43b) ------------------------------------------------------
+  ! ---- r = 0, electro-optic ------------------------------------------------------
   ! B1b terms 1-2 contain w_2 and w_q but NO w_p, so in the swapped pass both of term 1's poles land on
   ! resonance together when w_p = 0: a near-DOUBLE pole. It does not break the formula -- it AMPLIFIES the
   ! k-derivative discretisation error of X_nm, by ~1/eta^2 on top of the usual 1/N^2. So EO is correct
@@ -79,7 +87,7 @@ program test_second_symmetry
   write(*,'(A,ES10.3,A,ES10.3,A)') '  REPORT  r = 0   electro-optic D3h at 1*eta = ', d3h(symB), &
        '  vs ', d3h_shg, ' at r = 1 (floor).'
   write(*,'(A)') '                  The excess is amplified discretisation, not a defect: it falls as'
-  write(*,'(A)') '                  1/N^2 (x4.2 from 30x30 to 60x60) and as eta^2. HANDOFF 8.43b.'
+  write(*,'(A)') '                  1/N^2 (x4.2 from 30x30 to 60x60) and as eta^2.'
 
   if (nfail == 0) then
     write(*,'(A)') ' ALL TESTS PASSED'
@@ -126,6 +134,16 @@ contains
       m = max(m, maxval(abs(x(a,b,c,:)-y(a,c,b,:))))
     end do; end do; end do
     reldiff_t = m / max(maxval(abs(y(1:2,1:2,1:2,:))),1.0d-300)
+  end function
+  real(8) function realitydefect(s)   ! max of |antisym_bc Re| and |sym_bc Im|, relative to max|s|
+    complex(8), intent(in) :: s(3,3,3,nw)
+    integer :: a,b,c
+    real(8) :: m
+    m = 0.0d0
+    do a=1,3; do b=1,3; do c=1,3
+      m = max(m, maxval(abs(dble(s(a,b,c,:)) - dble(s(a,c,b,:)))), maxval(abs(aimag(s(a,b,c,:)) + aimag(s(a,c,b,:)))))
+    end do; end do; end do
+    realitydefect = 0.5d0*m / max(maxval(abs(s)),1.0d-300)
   end function
   real(8) function d3h(s)   ! COMPLETE D3h violation: hBN allows only xxx = -xyy = -yxy = -yyx
     complex(8), intent(in) :: s(3,3,3,nw)

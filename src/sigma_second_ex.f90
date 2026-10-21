@@ -1122,7 +1122,13 @@ end subroutine get_shg_intens_ex_matrix_methodB
 ! (get_sigma_shift_ex). The two differ through Eq. (A9b) term 3, the exciton populations and coherences,
 ! which that convention cancels by construction: on buckled hBN (75x75 and 90x90) the symmetric real part
 ! of the rectification is 0.53 of the shift current, mesh-converged; the difference comes from pairs of
-! distinct bound excitons, while in the continuum and in the non-interacting limit the two agree.
+! distinct bound excitons, while in the continuum the two agree. In the non-interacting limit they agree
+! only for ONE valence and ONE conduction band (hBN): with nv or nc > 1, term 3 couples non-interacting
+! excitons (v,c,k), (v',c,k) through v_vv' (or c, c'), i.e. the three-band virtual transitions that are part
+! of the independent-particle shift current, and the shift route drops them. Non-interacting In2Se3 30x30,
+! 4v x 1c, zzz: the shift route is 0.60-0.83 of the rectification, which equals the single-particle
+! rectification and a real-time propagation to 0.3% (eta = 0.15 eV); without term 3 the rectification
+! reproduces the shift route.
 !> Driver for the excitonic two-frequency response sigma^abc(w1+w2; w1, w2): builds the
 !! frequency pairs, picks method A or B, symmetrises and writes the result.
 !! Method A (term 3 on the bare current) is used wherever w_2 = 0 is in range -- the 1D w_q = -w_p scan

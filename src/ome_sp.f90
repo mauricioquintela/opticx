@@ -106,6 +106,9 @@ module ome_sp
    ! response peak by 0.32 eV and changes the spectrum by 42-124%.
    complex*16, allocatable, save :: a4_W(:,:,:)      ! (npointstotal, nband_ex, nband_ex)
    logical, save :: a4_W_ready = .false.
+   ! .true. when the band states of this run (computed, or read from the .omesp) carry the Lowdin phase convention
+   ! of fix_band_phases; only matters for a non-orthonormal model (.omesp bit 4 / linear marker #LOWDIN_PHASE)
+   logical, save :: lowdin_phase_ready = .false.
    logical, save :: a4_W_straddle_warned = .false.
    ! Exciton-window eigenvectors and Wannier-position connection on the k-mesh, for the covariant
    ! derivative of the exciton envelopes. Filled in the same loop and the same basis
@@ -121,7 +124,8 @@ module ome_sp
    ! Tagged tail of the nonlinear .omesp (format 2, 2026-10-06). After the per-k records and the two
    ! derivative arrays the file holds OMESP_TAG, a flags word and norb, then the optional sections in this
    ! order: a4_W (bit 0), the window states win_evec/win_sevec/win_xi2 (bit 1), the shift_covariant arrays
-   ! (bit 2), the covariant second-order arrays (bit 3). Storing a4_W and the window states lets a run with
+   ! (bit 2), the covariant second-order arrays (bit 3); bit 4 (no section): the band phases follow Xatu's convention
+   ! on the Lowdin coefficients S^{1/2} c (non-orthonormal models, fix_band_phases). Storing a4_W and the window states lets a run with
    ! OME_sp = none rebuild the basis the exciton envelopes must be carried into, which it otherwise cannot.
    ! Files without the tag (older versions) are still read; they simply lack those sections.
    integer, parameter :: OMESP_TAG = 1330464562
@@ -582,6 +586,7 @@ subroutine get_ome_sp(iflag_norder)
 
       a4_W_ready = .true.
       if (iflag_norder.eq.2) win_ready = .true.
+      lowdin_phase_ready = .true.
 
       write(*,*) '   Writing optical matrix elements (sp) into file'
       if (iflag_norder.eq.1) then
@@ -1243,6 +1248,8 @@ end subroutine get_berry_eigen_fourpoint
       if (allocated(a4_W) .and. a4_W_ready) then
          write(iounit10,'(a)') '#A4W'
          write(iounit10,*) a4_W
+         ! band phases on the Lowdin coefficients (fix_band_phases); an .omesp without this line predates it
+         if (.not. iflag_orthonormal) write(iounit10,'(a)') '#LOWDIN_PHASE'
       end if
       close(iounit10)
    end subroutine write_ome_sp_linear
@@ -1287,6 +1294,7 @@ end subroutine get_berry_eigen_fourpoint
       if (allocated(win_evec) .and. win_ready) flags = ibset(flags, 1)
       if (allocated(cov_rgen)) flags = ibset(flags, 2)
       if (allocated(cov_nb_T)) flags = ibset(flags, 3)
+      if (.not. iflag_orthonormal) flags = ibset(flags, 4)      ! no section: band phases on S^{1/2} c
       write(iounit10) OMESP_TAG, flags, norb
       if (btest(flags, 0)) write(iounit10) a4_W
       if (btest(flags, 1)) then
@@ -1510,7 +1518,7 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
          call diagoz_gen(norb,e,hkernel,s_work)
          hk_ev(:,:)=hkernel(:,:)
       end if
-      call phase_eigvec_nk(norb,hk_ev)
+      call fix_band_phases(norb,hk_ev,skernel)
 
       call build_vme_blocks(norb,hderkernel,akernel,hk_ev,e,M1,T1,vme)
 
@@ -1535,7 +1543,7 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
       if (present(Wout)) then
          Wsave = hk_ev
          if (apply_a4_rotation(norb,e,hk_ev,vme)) then
-            call phase_eigvec_nk(norb,hk_ev)
+            call fix_band_phases(norb,hk_ev,skernel)
             call build_vme_blocks(norb,hderkernel,akernel,hk_ev,e,M1,T1,vme)
          end if
          if (gauge_test_on) call scramble_gauge()
@@ -1549,7 +1557,7 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
          end if
       else
          if (apply_a4_rotation(norb,e,hk_ev,vme)) then
-            call phase_eigvec_nk(norb,hk_ev)
+            call fix_band_phases(norb,hk_ev,skernel)
             call build_vme_blocks(norb,hderkernel,akernel,hk_ev,e,M1,T1,vme)
          end if
          if (gauge_test_on) call scramble_gauge()
@@ -1782,6 +1790,9 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
             allocate(a4_W(npointstotal,nband_ex,nband_ex))
             read(u,*,iostat=ios) a4_W
             a4_W_ready = (ios == 0)
+            line = ''
+            if (ios == 0) read(u,'(a)',iostat=ios) line
+            lowdin_phase_ready = (trim(line) == '#LOWDIN_PHASE')
          end if
          close(u)
       else
@@ -1800,6 +1811,7 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
          pos = 1 + 4 + 8 + 3*nk*8 + nk*(nb*8 + 2*3*nb*nb*16 + 9*nb*nb*8 + 9*nb*nb*16) &
                + nk*9*nb*nb*8 + nk*9*nb*nb*16
          read(u, pos=pos, iostat=ios) tag, flags, norb_r
+         if (ios == 0 .and. tag == OMESP_TAG) lowdin_phase_ready = btest(flags, 4)
          if (ios == 0 .and. tag == OMESP_TAG) then
             if (btest(flags, 0)) then
                if (allocated(a4_W)) deallocate(a4_W)
@@ -1840,6 +1852,15 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
       ! them. Marking them usable here would let an unrotated fk_ex through on a cache miss, which is
       ! exactly the O(1) error the flag exists to prevent.
       if (.not. fk_ex_loaded) return
+
+      ! Non-orthonormal model: the band states must carry Xatu's phase convention (fix_band_phases). An .omesp
+      ! written before it does not, and its states would not match the envelopes.
+      if (.not. iflag_orthonormal .and. .not. lowdin_phase_ready) then
+         write(*,*) 'ERROR (ome_sp): non-orthonormal model, and the .omesp was written before opticx fixed the band'
+         write(*,*) '       phases as Xatu does (on S^{1/2} c): its band states do not match the exciton envelopes.'
+         write(*,*) '       Regenerate it once with OME_sp = linear or nonlinear.'
+         stop 1
+      end if
 
       ! Rotation switched off: the single-particle states were never rotated, so fk_ex as read from
       ! Xatu already matches them and is fit to use.
@@ -1921,6 +1942,45 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
       if (any_rot) write(*,*) '   Exciton envelopes carried into the Eq. (A4) rotated basis'
    end subroutine rotate_fk_ex_to_a4_basis
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   !> Phase of every band state: the convention of Xatu's band states (ExcitonTB::fixGlobalPhase, the sum of
+   !! the eigenvector's coefficients made real), so that the exciton envelopes, which are coefficients on Xatu's
+   !! states, refer to the same states here. With an overlap Xatu diagonalises the Lowdin Hamiltonian
+   !! S^{-1/2} H S^{-1/2} and fixes the phase of its eigenvectors S^{1/2} c, not of c; the two phases differ by
+   !! an amount that depends on k and the band, which garbled every excitonic matrix element (MoSe2 SOC, 2v x 4c:
+   !! excitonic absorbance 15% below Xatu's, 1.3e-3 with this convention). Single-particle results do not depend
+   !! on these phases.
+   subroutine fix_band_phases(norb,hk_ev,sk)
+      implicit none
+      integer, intent(in) :: norb
+      complex*16, intent(inout) :: hk_ev(norb,norb)
+      complex*16, intent(in) :: sk(norb,norb)
+      complex*16, allocatable :: u(:,:), sh(:,:), work(:)
+      real*8, allocatable :: w(:), rwork(:)
+      complex*16 :: aux1
+      integer :: j, info
+      if (iflag_orthonormal) then
+         call phase_eigvec_nk(norb,hk_ev)
+         return
+      end if
+      allocate(u(norb,norb), sh(norb,norb), work(4*norb), w(norb), rwork(3*norb))
+      u = sk
+      call zheev('V','U',norb,u,norb,w,work,4*norb,rwork,info)
+      if (info /= 0 .or. minval(w) <= 0.0d0) then
+         write(*,*) 'ERROR (ome_sp): the overlap matrix S(k) is not positive definite; cannot form S^{1/2}.'
+         stop 1
+      end if
+      do j = 1, norb
+         sh(:,j) = u(:,j)*sqrt(w(j))
+      end do
+      sh = matmul(sh, conjg(transpose(u)))                   ! S^{1/2}, the Hermitian square root
+      u = matmul(sh, hk_ev)                                  ! Lowdin coefficients of the band states
+      do j = 1, norb
+         aux1 = sum(u(:,j))
+         hk_ev(:,j) = hk_ev(:,j)*exp(cmplx(0.0d0, -atan2(aimag(aux1), dble(aux1)), 8))
+      end do
+      deallocate(u, sh, work, w, rwork)
+   end subroutine fix_band_phases
+
    subroutine phase_eigvec_nk(norb,hk_ev)
       implicit none
 

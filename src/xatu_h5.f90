@@ -31,6 +31,8 @@ module xatu_h5
     integer :: nexc = 0          ! exciton states in the archive
     integer :: dim = 0           ! exciton basis size, nk*nv*nc
     logical :: tda = .true.      ! Tamm-Dancoff approximation in the Xatu run
+    logical :: has_scissor = .false.   ! the archive records Xatu's scissor (archives converted from text do not)
+    real(8) :: scissor = 0.0d0         ! eV, added by Xatu to every transition energy of the BSE
     integer, allocatable :: vbands(:), cbands(:)   ! absolute 0-based band numbers, in basis order
   end type xatu_h5_info
 
@@ -83,6 +85,9 @@ subroutine xatu_h5_header(path, info)
   info%nexc        = read_attr_int(file, 'n_excitons', path)
   info%dim         = read_attr_int(file, 'exciton_basis_dim', path)
   info%tda         = read_attr_bool(file, 'tamm_dancoff', path)
+  call h5aexists_f(file, 'scissor', info%has_scissor, err)
+  if (err < 0) info%has_scissor = .false.
+  if (info%has_scissor) info%scissor = read_attr_double(file, 'scissor', path)
   call read_attr_ints(file, 'valence_bands', path, ivec)
   info%vbands = int(ivec)
   call read_attr_ints(file, 'conduction_bands', path, ivec)
@@ -304,6 +309,21 @@ subroutine read_attr_ints(file, name, path, v)
   call check(err, 'read attribute '//name, path)
   call h5aclose_f(attr, err)
 end subroutine read_attr_ints
+
+real(8) function read_attr_double(file, name, path)
+  integer(hid_t), intent(in) :: file
+  character(len=*), intent(in) :: name, path
+  integer(hid_t) :: attr
+  real(8), target :: v
+  integer :: err
+  type(c_ptr) :: buf
+  call open_attr(file, name, path, attr)
+  buf = c_loc(v)
+  call h5aread_f(attr, h5kind_to_type(kind(v), H5_REAL_KIND), buf, err)
+  call check(err, 'read attribute '//name, path)
+  call h5aclose_f(attr, err)
+  read_attr_double = v
+end function read_attr_double
 
 ! Booleans are the int8 enum {FALSE, TRUE}: read them with their own type into an int8.
 logical function read_attr_bool(file, name, path)

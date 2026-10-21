@@ -11,7 +11,7 @@
 # Compiler and flags
 # -----------------------------------------------------------------
 FC     = gfortran
-FFLAGS = -fopt-info-vec -g -fcheck=all -O3 -ffree-line-length-none
+FFLAGS = -fopt-info-vec -g -O3 -ffree-line-length-none
 #FFLAGS = -O2-Wall  -g -fcheck=all 
 
 # -----------------------------------------------------------------
@@ -124,7 +124,12 @@ $(BUILDDIR)/ome_sp.o: \
 	$(BUILDDIR)/parser_wannier90_tb.o \
 	$(BUILDDIR)/parser_optics_xatu_dim.o  
 
+$(BUILDDIR)/scissor.o: \
+	$(BUILDDIR)/parser_input_file.o \
+	$(BUILDDIR)/parser_optics_xatu_dim.o
+
 $(BUILDDIR)/ome_ex.o: \
+	$(BUILDDIR)/scissor.o \
 	$(BUILDDIR)/constants_math.o \
 	$(BUILDDIR)/parser_wannier90_tb.o \
 	$(BUILDDIR)/parser_optics_xatu_dim.o \
@@ -144,6 +149,7 @@ $(BUILDDIR)/optical_response.o: \
 	$(BUILDDIR)/sigma_second_ex.o
 
 $(BUILDDIR)/sigma_first_sp.o: \
+	$(BUILDDIR)/scissor.o \
 	$(BUILDDIR)/constants_math.o \
 	$(BUILDDIR)/parser_input_file.o \
 	$(BUILDDIR)/parser_optics_xatu_dim.o \
@@ -153,6 +159,7 @@ $(BUILDDIR)/sigma_first_ex.o: \
 	$(BUILDDIR)/constants_math.o 
 
 $(BUILDDIR)/sigma_second_sp.o: \
+	$(BUILDDIR)/scissor.o \
 	$(BUILDDIR)/constants_math.o \
 	$(BUILDDIR)/parser_input_file.o \
 	$(BUILDDIR)/parser_optics_xatu_dim.o \
@@ -283,6 +290,15 @@ check_bands: $(TARGET)
 # Band window: report and warning for an unusual Bandlist (a list of offsets, not a range)
 check_bandlist_guard: $(TARGET)
 	python3 tools/check_bandlist_guard.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_bandlist_guard
+
+# Scissor correction (keywords Scissor, Scissor_mode): identity at 0, rigid shift, excitonic = single particle in both
+# modes, the Xatu archive record, the cache record, guards.
+check_scissor: $(TARGET)
+	python3 tools/check_scissor.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_scissor
+
+# Non-orthonormal models: band phases as Xatu fixes them (on the Lowdin coefficients), the .omesp record, the guard.
+check_nonortho_phase: $(TARGET)
+	python3 tools/check_nonortho_phase.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_nonortho_phase
 
 # Xatu HDF5 archive input (needs a 'make HDF5=1' build and h5py): archive = text files, guards.
 # XATU=path/to/xatu (built with HDF5=1) adds a real Xatu run written both ways.

@@ -10,6 +10,7 @@ module sigma_first_sp
   rkxvector,rkyvector,rkzvector !k-vectors only used for testing
   use ome_ex, &
   only:read_ome_sp_linear !routine
+  use scissor, only: scissor_report, scissor_mesh_ev
   use omp_lib
 
   implicit none
@@ -44,6 +45,9 @@ module sigma_first_sp
     !read optical matrix elements from file
     write(*,*) '   Reading optical matrix elements...'
     call read_ome_sp_linear(iflag_norder,npointstotal,nband_ex,vme_ex_band,ek)
+    ! Scissor (no-op unless Scissor /= 0): conduction energies + Delta, v_cv rescaled in the r_unchanged mode
+    call scissor_report('single-particle linear conductivity')
+    call scissor_mesh_ev(npointstotal,nband_ex,ek,vme_ex_band)
     !allocate conductivity arrays
     call fill_allocate_sigma_arrays(eta1,nw,wp,sigma_w_sp)
     

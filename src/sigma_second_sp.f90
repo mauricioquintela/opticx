@@ -13,6 +13,7 @@ module sigma_second_sp
   use ome_ex, &
   only:read_ome_sp_nonlinear !routine
   use ome_sp, only: cov_exact_tol, valley_ratio
+  use scissor, only: scissor_on, scissor_report, scissor_mesh_shift_cov, scissor_mesh_stencil
   implicit none
 
   contains
@@ -106,6 +107,22 @@ module sigma_second_sp
       write(*,*) '       older version). Regenerate it once with OME_sp = nonlinear: every second-order Response then'
       write(*,*) '       reads it with OME_sp = none.'
       stop 1
+    end if
+
+    ! Scissor (Scissor /= 0): applied to the covariant routes' data; the per-band routes are not supported
+    if (scissor_on()) then
+      if ((nwp == 1 .and. nwq == -1 .and. trim(response_text) /= 'shift_covariant') .or. &
+          (.not. sp_covariant .and. (response_text == 'shg' .or. response_text == 'electrooptic' .or. &
+                                     response_text == 'rectification' .or. response_text == 'general'))) then
+        write(*,*) 'ERROR (sigma_second_sp): Scissor is implemented for the covariant single-particle routes only'
+        write(*,*) '       (Response = shift with Sp_method = covariant, and shg, electrooptic, rectification, general).'
+        write(*,*) '       Use Sp_method = covariant, or Scissor = 0 with '//trim(response_text)//'.'
+        stop 1
+      end if
+      call scissor_report('single-particle second order')
+      if (trim(response_text) == 'shift_covariant') &
+        call scissor_mesh_shift_cov(npointstotal,nband_ex,ek,cov_vraw_ex_band,cov_rgen_ex_band)
+      if (sp_cov_second()) call scissor_mesh_stencil(npointstotal,nband_ex,cov_nb_e,cov_nb_r)
     end if
 
     !compute shift conductivity

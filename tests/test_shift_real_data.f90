@@ -10,10 +10,10 @@
 ! cancelled ~80% of the first peak). The reference contains only the resonant delta term; the code also has
 ! the (non-resonant) term 1 and finite-eta pole structure, so the agreement is not round-off: measured
 ! max|diff|/max|ref| = 1.7e-2 for hBN, 30x30 grid, 100 excitons. The tolerance keeps ~3x margin and is
-! well below the error of the previous convention (order 1, see the control run in HANDOFF.md section 8).
+! well below the error of the previous convention (1.2, with the wrong sign, in a control run).
 ! Run through `make run_test_shift_real`.
 program test_shift_real_data
-  use constants_math,         only: pi
+  use constants_math,         only: pi, sigma2_au_to_si
   use parser_input_file,      only: get_input_file, material_name_in, nw, norb_ex_cut
   use parser_wannier90_tb,    only: wannier90_get
   use parser_optics_xatu_dim, only: get_optics_xatu_dim, e_ex, npointstotal, vcell
@@ -78,7 +78,7 @@ program test_shift_real_data
 
   sc = maxval(abs(ref))
   ! spectra for tools/plot_test_outputs.py (uA nm/V^2)
-  feps = 6.623618d-03*1.0d+06*(27.211386d0**(-2))*5.291772d-11*1.0d+09
+  feps = sigma2_au_to_si   ! includes e^3 = -1 (e = -|e|), same as the shipped output files
   open(77, file='shift_real_data_spectra.dat')
   write(77,'(A)') '# kind: shift_real_data'
   write(77,'(A)') '# columns: E_eV xxx_code xxx_ref xyy_code xyy_ref yxy_code yxy_ref'

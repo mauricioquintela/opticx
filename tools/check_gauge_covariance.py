@@ -20,8 +20,9 @@ Degenerate-block basis, on a model WITH exactly degenerate bands -- hBN has none
 monolayer MoS2 on a 15x15 mesh (MoS2_N15.eigval/.states, from MoS2_spin_wannier_07032024_tb.dat): with
 OPTICX_DEGEN_SCRAMBLE set, the envelopes inside every degenerate block are rotated by a k-dependent unitary,
 simulating Xatu having picked a different basis there. With Exciton_basis_repair = true the excitonic SHG
-must come back unchanged; with it off it must change by O(1) (sensitivity). Skipped, loudly, if the MoS2_N15
-files are not present.
+must come back unchanged; with it off it must change by O(1) (sensitivity). The same with all 899 of the 900 states,
+a (nearly) complete basis, where the repair's fit summed over every exciton vanishes (it is fitted on the lowest half).
+Skipped, loudly, if the MoS2_N15 files are not present.
 """
 import argparse, os, shutil, subprocess, sys
 import numpy as np
@@ -154,10 +155,10 @@ def main():
         print('\n  SKIP   degenerate-block checks: MoS2_N15.eigval/.states or the MoS2 tb file not found'
               f' (looked in {droot}). Generate with xatu --w90 26 <tb> exciton.config -ec -n 899 at ncells 15.')
     else:
-        def mrun(tag, repair, scramble):
+        def mrun(tag, repair, scramble, ncut=400):
             d = os.path.join(work, f'mos2_{tag}'); os.makedirs(d)
             txt = IN.format(tb=mtb, eig=meig, sta=msta, resp='shg', method='covariant')
-            txt = txt.replace('# Exciton_cutoff\n100', '# Exciton_cutoff\n400').replace('# Nfermi\n1', '# Nfermi\n26')
+            txt = txt.replace('# Exciton_cutoff\n100', f'# Exciton_cutoff\n{ncut}').replace('# Nfermi\n1', '# Nfermi\n26')
             txt = txt.replace('4.6 7.6 0.05 120', '0.8 3.2 0.025 120').replace('# Cache_ome_ex\nwrite', '# Cache_ome_ex\noff')
             open(os.path.join(d, 'in.txt'), 'w').write(txt + f'# Exciton_basis_repair\n{repair}\n')
             env = dict(os.environ); env.pop('OPTICX_GAUGE_TEST', None); env.pop('OPTICX_DEGEN_SCRAMBLE', None)
@@ -187,6 +188,17 @@ def main():
         e = rel(load(out2['false', False], f), load(out2['false', True], f))
         check('SENSITIVITY  repair=false excitonic SHG DOES change', e > 1e-2,
               f'{e:.2e} (must exceed 1e-2, else the scramble does not reach the degenerate blocks)')
+        # (Nearly) complete exciton basis: summed over every exciton the repair's fit matrix vanishes, so it is fitted on
+        # the lowest half only. All 899 of the 900 MoS2_N15 states.
+        full = {}
+        for scr in (False, True):
+            rc, log, d = mrun(f'full_{int(scr)}', 'true', scr, ncut=899)
+            full[scr] = d
+            if not scr:
+                check('MoS2_N15 all 899 excitons: repair converges', rc == 0 and 'basis repair: converged' in log.lower()
+                      and 'not converged' not in log.lower(), f'rc={rc}')
+        e = rel(load(full[False], f), load(full[True], f))
+        check('MoS2_N15 all 899 excitons: excitonic SHG unchanged by a different Xatu basis', e < 1e-9, f'{e:.2e} (tol 1e-9)')
 
     if nfail:
         print(f'\nFAILED: {nfail} check(s)'); sys.exit(1)

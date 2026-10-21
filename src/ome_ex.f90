@@ -15,6 +15,8 @@ module ome_ex
     only: fk_ex_der, get_fk_ex_der_k, get_kgrid_stencil
   use ome_sp, &
     only: rotate_fk_ex_to_a4_basis, win_evec, win_sevec, win_xi2, win_ready, OMESP_TAG
+  use scissor, only: scissor_on, scissor_ha, scissor_report, scissor_mesh_ex
+  use parser_input_file, only: scissor_ev, scissor_r_unchanged
   implicit none
   logical, save :: inter_terms_ready = .false.
 !   public :: inter_terms_ready
@@ -159,6 +161,9 @@ contains
       vme_ex_band = (0.0d0, 0.0d0)
       write(*,*) '   Reading optical matrix elements (sp)...'
       call read_ome_sp_linear(iflag_norder, npointstotal, nband_ex, vme_ex_band, ek)
+      ! Scissor: P_n is built from v_cv, rescaled in the r_unchanged mode (Xatu's energies carry the shift)
+      call scissor_report('excitonic ground-state-to-exciton elements')
+      call scissor_mesh_ex(npointstotal, nband_ex, ek, vme_ex_band, xme_ex_band)
     end if
 
     if (iflag_norder == 2) then
@@ -174,6 +179,9 @@ contains
                                   berry_eigen_ex_band = berry_eigen_ex_band, &
                                   vme_ex_band = vme_ex_band, ek = ek)
       call get_ome_sp_xme_ex_band(ek, vme_ex_band, xme_ex_band)
+      ! Scissor: X_n (from r_cv) or P_n (from v_cv) changes, by mode; X_nm and P_nm use same-side elements only
+      call scissor_report('excitonic ground-state-to-exciton elements')
+      call scissor_mesh_ex(npointstotal, nband_ex, ek, vme_ex_band, xme_ex_band)
       ! Before ANY matrix element is built from fk_ex, so X_n, X_nm and P_n all see the repaired basis.
       call scramble_degenerate_blocks(ek)     ! test hook, no-op unless OPTICX_DEGEN_SCRAMBLE is set
       if (basis_repair .and. xnm_covariant) call repair_degenerate_basis(ek)
@@ -404,9 +412,10 @@ contains
     deallocate(F, G2)
   contains
     !> U <- a unitary inside each block of consecutive bands within tol_deg (angles from seed).
+    !! e is assumed-shape: the callers pass a row section of ek (no copy, no -fcheck=all warning per call).
     subroutine block_rot(nb, e, U, seed)
       integer,    intent(in)    :: nb
-      real(8),    intent(in)    :: e(nb), seed
+      real(8),    intent(in)    :: e(:), seed
       complex(8), intent(inout) :: U(nb,nb)
       integer :: b0, b1
       real(8) :: th, ph1, ph2
@@ -438,7 +447,7 @@ contains
     complex(8), allocatable :: Tb(:,:), F(:,:), UT(:,:), FU(:,:)
     real(8)    :: inv2h(3), dRkdK(3,3), chg, maxchg, ucdev, sumdev
     integer    :: nbasis, kk, i, j, nd, isw, it, idim, sgn, kn, cnt, jc, jcp, jv, jvp, r, rp, n
-    integer    :: nblk
+    integer    :: nblk, nrep
     complex(8) :: Uc(nc_ex,nc_ex), Uv(nv_ex,nv_ex), Ucold(nc_ex,nc_ex), Uvold(nv_ex,nv_ex)
     complex(8) :: Wc(nc_ex,nc_ex), Wv(nv_ex,nv_ex), A(nc_ex,nc_ex), C(nv_ex,nv_ex)
     complex(8), allocatable :: K(:,:)
@@ -471,6 +480,13 @@ contains
     call get_kgrid_stencil(nbp, nbm, inv2h, dRkdK)
     allocate(Tb(nbasis, norb_ex_cut), F(nbasis, norb_ex_cut), UT(nbasis, norb_ex_cut), FU(nbasis, norb_ex_cut))
     allocate(K(nbasis, nbasis))
+    ! The rotation is fitted on the LOWEST excitons only (Xatu's are sorted by energy) and then applied to all.
+    ! The fit sums f_n(k)^* (transported f_n(k')) over excitons; over a complete basis that sum is the identity
+    ! between different k-points, i.e. zero, and the polar factor of a zero matrix is arbitrary: with all 41616
+    ! In2Se3 102x102 excitons the repair returned a random rotation at Gamma (mean |U - 1| = 1.76, no convergence)
+    ! and the excitonic rectification broke C3 by 88%. Half the basis keeps the low-energy envelopes, which are
+    ! smooth in k, and leaves any smaller set (e.g. 400 of 900 on MoS2 15x15) as it was.
+    nrep = min(norb_ex_cut, max(1, norb_ex/2))
 
     do isw = 1, nsweep_max
       maxchg = 0.0d0; sumdev = 0.0d0
@@ -529,7 +545,7 @@ contains
             do jc = 1, nc_ex
               A(jc,jcp) = (0.0d0,0.0d0)
               do jv = 1, nv_ex
-                A(jc,jcp) = A(jc,jcp) + sum(Tb((jc-1)*nv_ex+jv,:)*conjg(FU((jcp-1)*nv_ex+jv,:)))
+                A(jc,jcp) = A(jc,jcp) + sum(Tb((jc-1)*nv_ex+jv,1:nrep)*conjg(FU((jcp-1)*nv_ex+jv,1:nrep)))
               end do
             end do
           end do
@@ -547,7 +563,7 @@ contains
             do jv = 1, nv_ex
               C(jv,jvp) = (0.0d0,0.0d0)
               do jc = 1, nc_ex
-                C(jv,jvp) = C(jv,jvp) + sum(conjg(F((jc-1)*nv_ex+jv,:))*UT((jc-1)*nv_ex+jvp,:))
+                C(jv,jvp) = C(jv,jvp) + sum(conjg(F((jc-1)*nv_ex+jv,1:nrep))*UT((jc-1)*nv_ex+jvp,1:nrep))
               end do
             end do
           end do
@@ -575,11 +591,17 @@ contains
         sumdev = sumdev + maxval(abs(Uc)) + maxval(abs(Uv))
         fk_ex(nbasis*(kk-1)+1 : nbasis*kk, :) = FU
       end do
-      if (isw == 1) write(*,'(A,I0,A,I0,A,F7.4)') '   Basis repair: ', nd, ' k-points with exactly degenerate window bands (', &
-                          nblk, ' blocks); mean |U - 1| in the first sweep = ', sumdev/dble(nd)
+      if (isw == 1) write(*,'(A,I0,A,I0,A,F7.4,A,I0,A)') '   Basis repair: ', nd, ' k-points with exactly degenerate window'// &
+                          ' bands (', nblk, ' blocks); mean |U - 1| in the first sweep = ', sumdev/dble(nd), &
+                          ' (fitted on the lowest ', nrep, ' excitons)'
       if (maxchg < 1.0d-10) exit
     end do
-    write(*,'(A,I0,A,ES9.2)') '   Basis repair: converged after ', isw, ' sweeps, last max relative change ', maxchg
+    if (maxchg < 1.0d-10) then
+      write(*,'(A,I0,A,ES9.2)') '   Basis repair: converged after ', isw, ' sweeps, last max relative change ', maxchg
+    else
+      write(*,'(A,I0,A,ES9.2)') '   WARNING (basis repair): NOT converged after ', nsweep_max, &
+                                ' sweeps, last max relative change ', maxchg
+    end if
     deallocate(nbp, nbm, labc, labv, klist, Tb, F, UT, FU, K)
 
   contains
@@ -587,8 +609,10 @@ contains
     !> Within each degenerate block B (lab), set U_BB to the unitary maximising Re Tr[U_BB^H M_BB]
     !! (transpose_h = .false., i.e. polar(Mat)) or Re Tr[U_BB Mat_BB] (.true., polar(Mat)^H). Blocks of size 1
     !! are left at their current value (non-degenerate band: phase fixed by convention, not repaired).
+    !! lab is assumed-shape: the callers pass a row labc(kk,:), which an explicit-shape dummy made gfortran copy on
+    !! every call (with a runtime warning per call under -fcheck=all, at every degenerate k and sweep).
     subroutine set_block_polar(nb, lab, Mat, U, transpose_h)
-      integer,    intent(in)    :: nb, lab(nb)
+      integer,    intent(in)    :: nb, lab(:)
       complex(8), intent(in)    :: Mat(nb,nb)
       complex(8), intent(inout) :: U(nb,nb)
       logical,    intent(in)    :: transpose_h
@@ -1322,7 +1346,7 @@ contains
   subroutine write_ome_ex_second()
     implicit none
     character(len=14), parameter :: MAGIC = 'OPTICX-OMEEX2 '
-    integer,           parameter :: VERSION = 3
+    integer :: VERSION
     character(len=256) :: fname
     integer :: u, ios, m
 
@@ -1340,6 +1364,8 @@ contains
       return
     end if
 
+    ! v4 = v3 + the scissor record, written only with Scissor /= 0: a run without one writes exactly the v3 layout
+    VERSION = merge(4, 3, scissor_on())
     write(u) MAGIC, VERSION
     write(u) len_trim(material_name)
     write(u) trim(material_name)
@@ -1347,6 +1373,7 @@ contains
     write(u) nband_ex                                 ! v2: the band LIST, not just the counts --
     write(u) nband_index(1:nband_ex)                  ! nv/nc alone cannot tell [60,61] from [61,60]
     write(u) xnm_method_code()                        ! v3: how X_nm was built
+    if (VERSION == 4) write(u) scissor_ev, merge(1, 2, scissor_r_unchanged)   ! v4: eV, 1 r_ / 2 v_unchanged
     write(u) e_ex(1:norb_ex_cut)                      ! fingerprint of the Xatu solution
     write(u) xme_ex(1:3, 1:norb_ex_cut)
     write(u) vme_ex(1:3, 1:norb_ex_cut)
@@ -1389,9 +1416,9 @@ contains
     implicit none
     logical, intent(out) :: ok
     character(len=14), parameter :: MAGIC = 'OPTICX-OMEEX2 '
-    integer,           parameter :: VERSION = 3
     real(8),           parameter :: ETOL = 1.0d-10
-    integer :: method_in
+    integer :: method_in, smode_in
+    real(8) :: sciss_in
     character(len=256) :: fname
     character(len=14)  :: magic_in
     character(len=256) :: mat_in
@@ -1412,7 +1439,7 @@ contains
     if (ios /= 0) return
 
     read(u, iostat=ios) magic_in, ver
-    if (ios /= 0 .or. magic_in /= MAGIC .or. ver /= VERSION) then
+    if (ios /= 0 .or. magic_in /= MAGIC .or. (ver /= 3 .and. ver /= 4)) then
       if (ios == 0 .and. magic_in == MAGIC .and. ver == 1) then
         write(*,*) '   Cache '//trim(fname)//' is format version 1, which does NOT record the band'
         write(*,*) '        list and therefore cannot be checked for bands stored in a different'
@@ -1474,6 +1501,21 @@ contains
       write(*,'(A,I0,A,I0,A)') '          cached: ', method_in, '   wanted: ', xnm_method_code(), &
            '   (1 = finite_difference, 2 = covariant; keyword Xnm_derivative)'
       write(*,*) '          Delete it or move it aside, or set Xnm_derivative to match.'
+      close(u); stop 1
+    end if
+    ! v4: the scissor (X_n or P_n depend on it). A v3 file was written without one.
+    sciss_in = 0.0d0; smode_in = merge(1, 2, scissor_r_unchanged)
+    if (ver == 4) then
+      read(u, iostat=ios) sciss_in, smode_in
+      if (ios /= 0) then; close(u); return; end if
+    end if
+    if (abs(sciss_in - scissor_ev) > 1.0d-9 .or. (scissor_on() .and. smode_in /= merge(1, 2, scissor_r_unchanged))) then
+      write(*,*) '   ERROR (read_ome_ex_second): '//trim(fname)//' was built with a DIFFERENT scissor.'
+      write(*,'(A,F10.5,A,A)') '          cached: Scissor = ', sciss_in, ' eV, ', &
+           trim(merge('r_unchanged', 'v_unchanged', smode_in == 1))
+      write(*,'(A,F10.5,A,A)') '          wanted: Scissor = ', scissor_ev, ' eV, ', &
+           trim(merge('r_unchanged', 'v_unchanged', scissor_r_unchanged))
+      write(*,*) '          The ground-state-to-exciton elements differ. Delete it or move it aside.'
       close(u); stop 1
     end if
 
