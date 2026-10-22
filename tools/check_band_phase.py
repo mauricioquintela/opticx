@@ -18,7 +18,8 @@ Checks (excitonic SHG, the response that uses every kind of excitonic element):
   * the band states of a different model stop the run; an archive in the atomic Bloch gauge stops the run;
   * the .omesp records the band states it holds (tail bit 6 / '#BAND_PHASE 3' in the linear file): OME_sp = none with
     it gives the same SHG, with a file for other states stops before computing;
-  * the excitonic cache records them (format 5) and a run with other states refuses it; plain-sum runs keep writing
+  * the excitonic cache records them (format 5; format 6 with Xatu's stored states, where the exciton basis repair is
+    skipped) and a run with other states refuses it, as does a format-5 cache on Xatu's states; plain-sum runs keep writing
     the old layout (format 3);
   * a non-orthonormal model: Xatu stores the Lowdin coefficients S^{1/2} c; aligned = Band_phase = weighted on text.
 
@@ -165,6 +166,8 @@ def main():
     dev = [l for l in log.splitlines() if 'largest angle' in l]
     check('... largest angle to Xatu''s states < 1e-6 rad (rounding)', bool(dev) and
           float(dev[0].split('angle')[1].split('rad')[0]) < 1e-6, dev[0].strip() if dev else 'no angle line')
+    check('... exciton basis repair skipped (the states inside degenerate groups are Xatu''s already)',
+          'Basis repair: not needed, the band states are the Xatu archive' in log)
     ref = shg(dW) if ok else None
     dS, rc, log = run('aligned_sum', sets[('sum', False)]['h5'])
     check('archive with band states (plain-sum rule) = weighted rule: same excitonic SHG (1e-8)', ended(rc, log) and ref is not None
@@ -228,7 +231,17 @@ def main():
     d, rc, log = run('cache', sets[('weighted', False)]['h5'], extra='# Cache_ome_ex\nwrite\n', d=dC)
     cf = os.path.join(dC, 'ome_second_ex_hBN.omeex2')
     ver = struct.unpack_from('<i', open(cf, 'rb').read(), 14)[0] if os.path.exists(cf) else -1
-    check('cache of a run on Xatu''s states: format 5', ended(rc, log) and ver == 5, f'version {ver}')
+    check('cache of a run on Xatu''s states: format 6 (records the skipped repair)', ended(rc, log) and ver == 6, f'version {ver}')
+    # the format-5 cache an earlier version wrote on the same states (repair applied): version 5, no repair record
+    b = bytearray(open(cf, 'rb').read()) if os.path.exists(cf) else bytearray(100)
+    nlen = struct.unpack_from('<i', b, 18)[0]; o = 22 + nlen + 16
+    nb = struct.unpack_from('<i', b, o)[0]; o += 4 + 4*nb + 4 + 12 + 4          # band list, X_nm method, scissor, phase code
+    old5 = b[:o] + b[o + 4:]; struct.pack_into('<i', old5, 14, 5)
+    dC5 = os.path.join(work, 'cache_v5'); os.makedirs(dC5)
+    open(os.path.join(dC5, 'ome_second_ex_hBN.omeex2'), 'wb').write(bytes(old5))
+    d, rc, log = run('cache_v5', sets[('weighted', False)]['h5'], extra='# Cache_ome_ex\nread\n', d=dC5)
+    check('... a format-5 cache on Xatu''s states (repair applied by an earlier version): stops', rc != 0 and
+          'still applied the exciton basis repair' in log and 'Entering sigma' not in log, f'rc {rc}')
     d, rc, log = run('cache', sets[('weighted', False)]['h5n'], extra='# Cache_ome_ex\nread\n# Band_phase\nweighted\n', d=dC)
     check('... read by a run with other states (Band_phase = weighted): stops', rc != 0 and 'DIFFERENT band states' in log, f'rc {rc}')
     d, rc, log = run('cache', sets[('weighted', False)]['h5'], extra='# Cache_ome_ex\nread\n', d=dC)

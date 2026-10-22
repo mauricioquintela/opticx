@@ -184,7 +184,16 @@ contains
       call scissor_mesh_ex(npointstotal, nband_ex, ek, vme_ex_band, xme_ex_band)
       ! Before ANY matrix element is built from fk_ex, so X_n, X_nm and P_n all see the repaired basis.
       call scramble_degenerate_blocks(ek)     ! test hook, no-op unless OPTICX_DEGEN_SCRAMBLE is set
-      if (basis_repair .and. xnm_covariant) call repair_degenerate_basis(ek)
+      ! The repair guesses the rotation between Xatu's basis inside exactly degenerate groups and opticx's, which a Xatu
+      ! text file does not tell. When the band states are taken from the Xatu archive (band_phase_code = 3) they ARE
+      ! Xatu's, inside degenerate groups too (ome_sp align_window_to_xatu), the right rotation is the identity, and the
+      ! repair would rotate the envelopes alone, i.e. change the excitons: MoSe2 SOC 87x87, lowest 3900 excitons, SHG C3
+      ! residual 7.1% with the repair, 0.45% without (complete basis: |U - 1| = 0.19 at 289 k-points).
+      if (basis_repair .and. xnm_covariant .and. band_phase_code == 3) then
+        write(*,*) '   Basis repair: not needed, the band states are the Xatu archive''s (degenerate groups included)'
+      else if (basis_repair .and. xnm_covariant) then
+        call repair_degenerate_basis(ek)
+      end if
     end if
 
     allocate(vme_ex(3, norb_ex_cut))
@@ -1386,6 +1395,9 @@ contains
     ! band states are not made with the plain-sum rule: a plain-sum run writes exactly the v3/v4 layout.
     VERSION = merge(4, 3, scissor_on())
     if (band_phase_code /= 1) VERSION = 5
+    ! v6 = v5 + a record that the basis repair was skipped (Xatu's band states taken from the archive); a v5 cache on
+    ! those states was written with the repair applied to them, which changes the excitons (see get_ome_ex)
+    if (band_phase_code == 3) VERSION = 6
     write(u) MAGIC, VERSION
     write(u) len_trim(material_name)
     write(u) trim(material_name)
@@ -1394,7 +1406,8 @@ contains
     write(u) nband_index(1:nband_ex)                  ! nv/nc alone cannot tell [60,61] from [61,60]
     write(u) xnm_method_code()                        ! v3: how X_nm was built
     if (VERSION >= 4) write(u) scissor_ev, merge(1, 2, scissor_r_unchanged)   ! v4: eV, 1 r_ / 2 v_unchanged
-    if (VERSION == 5) write(u) band_phase_code        ! v5: how the band states were made
+    if (VERSION >= 5) write(u) band_phase_code        ! v5: how the band states were made
+    if (VERSION == 6) write(u) 0                      ! v6: basis repair skipped (0 = not applied)
     write(u) e_ex(1:norb_ex_cut)                      ! fingerprint of the Xatu solution
     write(u) xme_ex(1:3, 1:norb_ex_cut)
     write(u) vme_ex(1:3, 1:norb_ex_cut)
@@ -1460,7 +1473,7 @@ contains
     if (ios /= 0) return
 
     read(u, iostat=ios) magic_in, ver
-    if (ios /= 0 .or. magic_in /= MAGIC .or. (ver < 3 .or. ver > 5)) then
+    if (ios /= 0 .or. magic_in /= MAGIC .or. (ver < 3 .or. ver > 6)) then
       if (ios == 0 .and. magic_in == MAGIC .and. ver == 1) then
         write(*,*) '   Cache '//trim(fname)//' is format version 1, which does NOT record the band'
         write(*,*) '        list and therefore cannot be checked for bands stored in a different'
@@ -1544,8 +1557,18 @@ contains
 
     ! v5: the band states the elements were built on. A v3/v4 file used the plain-sum phase rule.
     phase_in = 1
-    if (ver == 5) then
+    if (ver >= 5) then
       read(u, iostat=ios) phase_in
+      if (ios /= 0) then; close(u); return; end if
+    end if
+    if (ver == 5 .and. phase_in == 3) then
+      write(*,*) '   ERROR (read_ome_ex_second): '//trim(fname)//' was built on the Xatu archive''s band states by a version'
+      write(*,*) '          that still applied the exciton basis repair to them, which rotates the envelopes at exactly'
+      write(*,*) '          degenerate k-points and changes the excitons. Delete it or move it aside and recompute.'
+      close(u); stop 1
+    end if
+    if (ver == 6) then
+      read(u, iostat=ios) m
       if (ios /= 0) then; close(u); return; end if
     end if
     if (phase_in /= band_phase_code) then
