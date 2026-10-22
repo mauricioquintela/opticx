@@ -18,6 +18,7 @@ module parser_input_file
   public :: xnm_covariant, basis_repair
   public :: sp_covariant
   public :: scissor_ev, scissor_r_unchanged, scissor_mode_text
+  public :: band_phase_weighted, band_phase_given, band_phase_text
   public :: build_freq_pairs
   public :: iflag_xatu
   public :: iflag_xatu_h5, xatu_h5_filepath_in
@@ -99,6 +100,16 @@ module parser_input_file
   real(8) :: scissor_ev = 0.0d0
   logical :: scissor_r_unchanged = .true.
   character(len=100) :: scissor_mode_text = 'r_unchanged'
+  ! Band_phase: how Xatu fixed the phase of each band state, needed when the exciton input does not store Xatu's
+  ! band states (text .eigval/.states, archives converted from text). The envelopes are coefficients on those
+  ! states, so opticx must rebuild them with the same phases. sum (DEFAULT, ExcitonTB::fixGlobalPhase): the sum
+  ! of the coefficients is real; weighted: sum_i w_i c_i is real, w_i = exp(2 pi i g (i-1)), g = (sqrt(5) - 1)/2
+  ! (Xatu builds that avoid the accidental zeros of the plain sum). With an overlap both act on the Lowdin
+  ! coefficients S^{1/2} c. Ignored when the Xatu archive stores its band states (bands/eigenvectors): opticx
+  ! then takes the phases from them.
+  logical :: band_phase_weighted = .false.
+  logical :: band_phase_given = .false.
+  character(len=100) :: band_phase_text = 'sum'
   real(8) :: e1b = 0.0d0, e2b = 0.0d0
   integer :: nwb = 0
   logical :: two_freq_grid = .false.
@@ -384,6 +395,20 @@ module parser_input_file
               case default
                 write(*,*) 'ERROR (parser_input_file): Sp_method = "'//trim(sp_method_text)//'" is not recognised.'
                 write(*,*) '       Valid: covariant (default), per_band.'
+                stop 1
+            end select
+          else if (index(param_name, 'Band_phase') > 0) then
+            read(iounit10,'(A)') band_phase_text
+            band_phase_text = to_lower(adjustl(band_phase_text))
+            band_phase_given = .true.
+            select case (trim(band_phase_text))
+              case ('sum')
+                band_phase_weighted = .false.
+              case ('weighted')
+                band_phase_weighted = .true.
+              case default
+                write(*,*) 'ERROR (parser_input_file): Band_phase = "'//trim(band_phase_text)//'" is not recognised.'
+                write(*,*) '       Valid: sum (default), weighted.'
                 stop 1
             end select
           else if (index(param_name, 'Scissor_mode') > 0) then        ! before 'Scissor': substring match

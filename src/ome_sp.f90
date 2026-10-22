@@ -5,7 +5,7 @@ module ome_sp
       only:material_name,nR,nRvec,norb,R,shop,hhop,rhop_c
    use parser_optics_xatu_dim, &
       only:npointstotal,rkxvector,rkyvector,rkzvector, &
-      nband_ex,nband_index,nv_ex,nc_ex
+      nband_ex,nband_index,nv_ex,nc_ex,band_phase_code,xatu_bvec
 
    implicit none
 
@@ -109,6 +109,21 @@ module ome_sp
    ! .true. when the band states of this run (computed, or read from the .omesp) carry the Lowdin phase convention
    ! of fix_band_phases; only matters for a non-orthonormal model (.omesp bit 4 / linear marker #LOWDIN_PHASE)
    logical, save :: lowdin_phase_ready = .false.
+   ! band_phase_code (parser_optics_xatu_dim) of the band states of this run: the code get_ome_sp built them with, or
+   ! the one recorded in the .omesp read with OME_sp = none (nonlinear: tail bits 5 = weighted, 6 = Xatu's stored
+   ! states; linear: a '#BAND_PHASE n' line; neither = 1, the plain-sum rule of every older file)
+   integer, save :: states_phase_code = 1
+   ! band_phase_code = 2: the weights w_i = exp(2 pi i g (i-1)), g = (sqrt(5) - 1)/2, of the phase rule
+   complex*16, allocatable, save :: phase_w(:)
+   ! band_phase_code = 3 (align_window_to_xatu): window slot of every band (0 outside the window), the mesh point
+   ! the current thread is working on (0 outside get_ome_sp's k-loop), and the deviation found by the last alignment
+   integer, allocatable, save :: xwin_slot(:)
+   integer, save :: cur_ibz = 0
+   real(8), save :: al_dev = 0.0d0
+   logical, save :: al_strad = .false.
+   !$omp threadprivate(cur_ibz, al_dev, al_strad)
+   ! degenerate groups for the alignment (Hartree): the same tolerance as the exciton basis repair
+   real(8), parameter :: align_tol = 1.0d-6
    logical, save :: a4_W_straddle_warned = .false.
    ! Exciton-window eigenvectors and Wannier-position connection on the k-mesh, for the covariant
    ! derivative of the exciton envelopes. Filled in the same loop and the same basis
@@ -125,7 +140,8 @@ module ome_sp
    ! derivative arrays the file holds OMESP_TAG, a flags word and norb, then the optional sections in this
    ! order: a4_W (bit 0), the window states win_evec/win_sevec/win_xi2 (bit 1), the shift_covariant arrays
    ! (bit 2), the covariant second-order arrays (bit 3); bit 4 (no section): the band phases follow Xatu's convention
-   ! on the Lowdin coefficients S^{1/2} c (non-orthonormal models, fix_band_phases). Storing a4_W and the window states lets a run with
+   ! on the Lowdin coefficients S^{1/2} c (non-orthonormal models, fix_band_phases); bits 5 and 6 (no section): the
+   ! weighted-sum phase rule, or the exciton-window states taken from the Xatu archive (states_phase_code 2, 3). Storing a4_W and the window states lets a run with
    ! OME_sp = none rebuild the basis the exciton envelopes must be carried into, which it otherwise cannot.
    ! Files without the tag (older versions) are still read; they simply lack those sections.
    integer, parameter :: OMESP_TAG = 1330464562
@@ -283,6 +299,10 @@ subroutine get_ome_sp(iflag_norder)
       ! Filling check: OptiX occupies bands by index, so Nfermi must put the Fermi level in a gap at EVERY
       ! k-point. Highest energy of band nf, lowest of band nf+1, smallest direct gap, over the mesh (Hartree).
       real(8) :: fill_vmax, fill_cmin, fill_gapmin
+      ! band_phase_code = 3: largest mismatch with Xatu's band states (1 - smallest singular value of the overlap)
+      ! and the number of k-points where a degenerate group crosses the window edge
+      real(8) :: al_dev_max
+      integer :: al_nstrad
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       write(*,*) '5. Entering ome_sp'
       block
@@ -340,6 +360,23 @@ subroutine get_ome_sp(iflag_norder)
       end if
       nstr = 0
       fill_vmax = -huge(1.0d0); fill_cmin = huge(1.0d0); fill_gapmin = huge(1.0d0)
+      al_dev_max = 0.0d0; al_nstrad = 0
+      if (allocated(phase_w)) deallocate(phase_w)
+      allocate(phase_w(norb))
+      do i = 1, norb
+         phase_w(i) = exp(cmplx(0.0d0, 2.0d0*acos(-1.0d0)*0.5d0*(sqrt(5.0d0) - 1.0d0)*dble(i - 1), 8))
+      end do
+      if (band_phase_code == 3) then
+         if (.not. allocated(xatu_bvec)) then
+            write(*,*) 'ERROR (ome_sp): band_phase_code = 3 but no Xatu band states were loaded.'
+            stop 1
+         end if
+         if (allocated(xwin_slot)) deallocate(xwin_slot)
+         allocate(xwin_slot(norb)); xwin_slot = 0
+         do i = 1, nband_ex
+            xwin_slot(nband_index(i)) = i
+         end do
+      end if
 
       allocate(vme_ex_band(npointstotal,3,nband_ex,nband_ex))
       allocate(ek(npointstotal,nband_ex))
@@ -387,6 +424,7 @@ subroutine get_ome_sp(iflag_norder)
       !$OMP PRIVATE(Tn_k,rr_k,ee_k,xi_k)&                      ! shg_covariant scratch
       !$OMP   SHARED(cov_on,cov_rgen,cov_vraw,cov_blk) REDUCTION(+:nstr) &
       !$OMP   REDUCTION(max:fill_vmax) REDUCTION(min:fill_cmin,fill_gapmin) SHARED(nf) &
+      !$OMP   REDUCTION(max:al_dev_max) REDUCTION(+:al_nstrad) &
       !$OMP   SHARED(shgcov_on,cov_nb_T,cov_nb_r,cov_nb_e,cov_xi) &
       !$OMP   SHARED(kmoment), &
       ! read-only inputs:
@@ -425,6 +463,7 @@ subroutine get_ome_sp(iflag_norder)
             rkx=rkxvector(ibz)
             rky=rkyvector(ibz)
             rkz=rkzvector(ibz)
+            cur_ibz = ibz            ! mesh point of this thread, for align_window_to_xatu
 
             ! second order: the derivative routines below need this k-point and its +-dk neighbours
             ! several times each; build them in one pass and serve the repeats from the cache
@@ -433,6 +472,8 @@ subroutine get_ome_sp(iflag_norder)
                   hkernel,hderkernel,akernel)
             call get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel, &
                   hk_ev,e,vme,M1,T1,Wfull)                       ! CHANGED: M1,T1,Wfull appended
+            al_dev_max = max(al_dev_max, al_dev)            ! zero unless the states were aligned to Xatu's
+            if (al_strad) al_nstrad = al_nstrad + 1
             if (nf >= 1 .and. nf < norb) then
                fill_vmax = max(fill_vmax, e(nf)); fill_cmin = min(fill_cmin, e(nf+1))
                fill_gapmin = min(fill_gapmin, e(nf+1) - e(nf))
@@ -553,6 +594,7 @@ subroutine get_ome_sp(iflag_norder)
             end do
       end do
       !$OMP END DO
+      cur_ibz = 0
 
       deallocate(skernel,hkernel,sderkernel,hderkernel,akernel)
       deallocate(gen_der,vme_der,vme_abs_der,gd1,gd2,gd3,hk_ev_neigh,vme_neigh,vme_der_phase)
@@ -584,9 +626,37 @@ subroutine get_ome_sp(iflag_norder)
          end if
       end if
 
+      ! Xatu's band states (band_phase_code = 3): both codes diagonalise the same model, so the overlap of the window
+      ! states must be unitary. Its deficit 1 - s_min is second order in the angle between the two sets of states,
+      ! theta = sqrt(2 (1 - s_min)), which is what is reported: rounding noise ~1e-7; a different Wannier90 file (or
+      ! one Xatu read differently) O(0.1) (hBN with hoppings 30% stronger: 0.12 rad); a model that opticx Hermitised
+      ! on reading and Xatu did not, in between.
+      if (band_phase_code == 3) then
+         al_dev_max = sqrt(2.0d0*max(al_dev_max, 0.0d0))
+         if (al_dev_max > 1.0d-2) then
+            write(*,'(a,es9.2,a)') ' ERROR (ome_sp): the band states stored in the Xatu archive are not the eigenstates of'// &
+                 ' this model (angle up to ', al_dev_max, ' rad).'
+            write(*,*) '       Was Xatu run with this Wannier90 file (and the same Orthonormal setting)?'
+            stop 1
+         else if (al_dev_max > 1.0d-5) then
+            write(*,'(a,es9.2,a)') '    WARNING (ome_sp): the band states of the Xatu archive differ from this model''s by up to ', &
+                 al_dev_max, ' rad; a Wannier90 file that differs slightly from Xatu''s?'
+         else
+            write(*,'(a,es9.2,a)') '    Exciton-window states = the Xatu archive''s band states (largest angle ', al_dev_max, ' rad)'
+         end if
+         if (al_nstrad > 0) then
+            write(*,'(a,i0,a)') '    WARNING (ome_sp): at ', al_nstrad, ' k-points a group of degenerate bands crosses the edge of'// &
+                 ' the exciton band window. OptiX follows Xatu''s choice of'
+            write(*,'(a)') '             state inside the group, but Xatu''s exciton basis there holds only part of a degenerate'// &
+                 ' group, which breaks the'
+            write(*,'(a)') '             crystal symmetry of the excitons: widen the band window of the Xatu run.'
+         end if
+      end if
+
       a4_W_ready = .true.
       if (iflag_norder.eq.2) win_ready = .true.
       lowdin_phase_ready = .true.
+      states_phase_code = band_phase_code
 
       write(*,*) '   Writing optical matrix elements (sp) into file'
       if (iflag_norder.eq.1) then
@@ -1250,6 +1320,8 @@ end subroutine get_berry_eigen_fourpoint
          write(iounit10,*) a4_W
          ! band phases on the Lowdin coefficients (fix_band_phases); an .omesp without this line predates it
          if (.not. iflag_orthonormal) write(iounit10,'(a)') '#LOWDIN_PHASE'
+         ! how the band phases were fixed (band_phase_code); an .omesp without this line used the plain-sum rule
+         if (states_phase_code /= 1) write(iounit10,'(a,i0)') '#BAND_PHASE ', states_phase_code
       end if
       close(iounit10)
    end subroutine write_ome_sp_linear
@@ -1295,6 +1367,8 @@ end subroutine get_berry_eigen_fourpoint
       if (allocated(cov_rgen)) flags = ibset(flags, 2)
       if (allocated(cov_nb_T)) flags = ibset(flags, 3)
       if (.not. iflag_orthonormal) flags = ibset(flags, 4)      ! no section: band phases on S^{1/2} c
+      if (states_phase_code == 2) flags = ibset(flags, 5)       ! no section: weighted-sum phase rule
+      if (states_phase_code == 3) flags = ibset(flags, 6)       ! no section: window states = Xatu's stored states
       write(iounit10) OMESP_TAG, flags, norb
       if (btest(flags, 0)) write(iounit10) a4_W
       if (btest(flags, 1)) then
@@ -1519,6 +1593,9 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
          hk_ev(:,:)=hkernel(:,:)
       end if
       call fix_band_phases(norb,hk_ev,skernel)
+      ! Exciton window at a mesh point: Xatu's own band states, when its archive stores them. Before everything
+      ! else, so that every diagonalisation at this k-point starts from them and Wout below is measured from them.
+      if (band_phase_code == 3) call align_window_to_xatu(norb,e,hk_ev,skernel)
 
       call build_vme_blocks(norb,hderkernel,akernel,hk_ev,e,M1,T1,vme)
 
@@ -1790,9 +1867,15 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
             allocate(a4_W(npointstotal,nband_ex,nband_ex))
             read(u,*,iostat=ios) a4_W
             a4_W_ready = (ios == 0)
-            line = ''
-            if (ios == 0) read(u,'(a)',iostat=ios) line
-            lowdin_phase_ready = (trim(line) == '#LOWDIN_PHASE')
+            ! optional marker lines, in any order: '#LOWDIN_PHASE', '#BAND_PHASE n'
+            lowdin_phase_ready = .false.; states_phase_code = 1
+            do while (ios == 0)
+               line = ''
+               read(u,'(a)',iostat=ios) line
+               if (ios /= 0) exit
+               if (trim(line) == '#LOWDIN_PHASE') lowdin_phase_ready = .true.
+               if (line(1:11) == '#BAND_PHASE') read(line(12:),*,iostat=ios) states_phase_code
+            end do
          end if
          close(u)
       else
@@ -1811,7 +1894,12 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
          pos = 1 + 4 + 8 + 3*nk*8 + nk*(nb*8 + 2*3*nb*nb*16 + 9*nb*nb*8 + 9*nb*nb*16) &
                + nk*9*nb*nb*8 + nk*9*nb*nb*16
          read(u, pos=pos, iostat=ios) tag, flags, norb_r
-         if (ios == 0 .and. tag == OMESP_TAG) lowdin_phase_ready = btest(flags, 4)
+         if (ios == 0 .and. tag == OMESP_TAG) then
+            lowdin_phase_ready = btest(flags, 4)
+            states_phase_code = 1
+            if (btest(flags, 5)) states_phase_code = 2
+            if (btest(flags, 6)) states_phase_code = 3
+         end if
          if (ios == 0 .and. tag == OMESP_TAG) then
             if (btest(flags, 0)) then
                if (allocated(a4_W)) deallocate(a4_W)
@@ -1859,6 +1947,16 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
          write(*,*) 'ERROR (ome_sp): non-orthonormal model, and the .omesp was written before opticx fixed the band'
          write(*,*) '       phases as Xatu does (on S^{1/2} c): its band states do not match the exciton envelopes.'
          write(*,*) '       Regenerate it once with OME_sp = linear or nonlinear.'
+         stop 1
+      end if
+
+      ! The band states must be the ones the envelopes refer to: built with the phase rule of this run, or taken
+      ! from the Xatu archive. An .omesp read with OME_sp = none records how its states were made.
+      if (states_phase_code /= band_phase_code) then
+         write(*,'(a,a,a,a,a)') ' ERROR (ome_sp): the band states in the .omesp were made with ', &
+              trim(phase_code_name(states_phase_code)), ', but this run needs ', trim(phase_code_name(band_phase_code)), '.'
+         write(*,*) '       They would not match the exciton envelopes. Regenerate the .omesp once with OME_sp = linear'
+         write(*,*) '       or nonlinear (or set Band_phase to match, if the exciton input stores no band states).'
          stop 1
       end if
 
@@ -1942,9 +2040,109 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
       if (any_rot) write(*,*) '   Exciton envelopes carried into the Eq. (A4) rotated basis'
    end subroutine rotate_fk_ex_to_a4_basis
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   !> Name of a band_phase_code, for messages.
+   function phase_code_name(code) result(name)
+      implicit none
+      integer, intent(in) :: code
+      character(len=64) :: name
+      select case (code)
+         case (1);  name = 'the plain-sum phase rule (Band_phase = sum)'
+         case (2);  name = 'the weighted-sum phase rule (Band_phase = weighted)'
+         case (3);  name = 'the band states of the Xatu archive'
+         case default; name = 'an unknown phase convention'
+      end select
+   end function phase_code_name
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   !> band_phase_code = 3: make the exciton-window states at a mesh point exactly the states Xatu stored in its
+   !! archive (xatu_bvec), on which the envelopes are coefficients. Within each group of degenerate bands
+   !! (consecutive gaps below align_tol) the window members are rotated by the unitary polar factor of their
+   !! overlap with Xatu's states: a phase for a non-degenerate band, Xatu's basis inside a degenerate group.
+   !! The overlap is taken between Lowdin coefficients (S^{1/2} c, which is what Xatu diagonalises and stores)
+   !! and is unitary when both codes diagonalise the same model; 1 - its smallest singular value is returned in
+   !! al_dev (get_ome_sp reports the angle sqrt(2 al_dev)); a group with members outside the window sets
+   !! al_strad. The k-point is recognised by an
+   !! exact match with mesh point cur_ibz, so the +-dk stencil points of the derivatives are left alone.
+   subroutine align_window_to_xatu(norb, e, hk_ev, sk)
+      implicit none
+      integer, intent(in) :: norb
+      real(8), intent(in) :: e(norb)
+      complex*16, intent(inout) :: hk_ev(norb,norb)
+      complex*16, intent(in) :: sk(norb,norb)
+      complex*16, allocatable :: L(:,:), Ov(:,:), U(:,:), VT(:,:), work(:), sh(:,:), blk(:,:)
+      real(8), allocatable :: sv(:), rwork(:), w(:)
+      integer, allocatable :: cols(:), ocols(:)
+      integer :: lo, hi, nm, nb, i, j, info, lwork
+      complex*16 :: wq(1)
+
+      al_dev = 0.0d0; al_strad = .false.
+      if (cur_ibz < 1) return
+      if (gt_k(1) /= rkxvector(cur_ibz) .or. gt_k(2) /= rkyvector(cur_ibz) .or. gt_k(3) /= rkzvector(cur_ibz)) return
+
+      allocate(L(norb,norb))
+      if (iflag_orthonormal) then
+         L = hk_ev
+      else
+         allocate(U(norb,norb), w(norb), work(4*norb), rwork(3*norb), sh(norb,norb))
+         U = sk
+         call zheev('V','U',norb,U,norb,w,work,4*norb,rwork,info)
+         if (info /= 0 .or. minval(w) <= 0.0d0) then
+            write(*,*) 'ERROR (ome_sp): the overlap matrix S(k) is not positive definite; cannot form S^{1/2}.'
+            stop 1
+         end if
+         do j = 1, norb
+            sh(:,j) = U(:,j)*sqrt(w(j))
+         end do
+         sh = matmul(sh, conjg(transpose(U)))
+         L = matmul(sh, hk_ev)
+         deallocate(U, w, work, rwork, sh)
+      end if
+
+      lo = 1
+      do while (lo <= norb)
+         hi = lo
+         do while (hi < norb)
+            if (e(hi+1) - e(hi) >= align_tol) exit
+            hi = hi + 1
+         end do
+         nm = count(xwin_slot(lo:hi) > 0)
+         nb = hi - lo + 1
+         if (nm > 0) then
+            ! Ov = (group states)^H (Xatu's window states of the group), nb x nm. Its SVD U S V^H gives the isometry
+            ! U(:,1:nm) V^H: the group states closest to Xatu's, i.e. Xatu's states themselves when they lie in the
+            ! group (S = 1). A group entirely inside the window (nb = nm) is thereby rotated into Xatu's basis; one that
+            ! crosses the window edge (nm < nb) is rotated as a whole, the members outside the window becoming the
+            ! orthogonal complement U(:,nm+1:nb) -- a phase alone would leave the window member a different
+            ! combination of the degenerate pair than the one the envelopes refer to.
+            cols = pack([(i, i = lo, hi)], xwin_slot(lo:hi) > 0)
+            ocols = pack([(i, i = lo, hi)], xwin_slot(lo:hi) == 0)
+            allocate(Ov(nb,nm), U(nb,nb), VT(nm,nm), sv(nm), rwork(5*nb), blk(norb,nb))
+            Ov = matmul(conjg(transpose(L(:,lo:hi))), xatu_bvec(:, xwin_slot(cols), cur_ibz))
+            call zgesvd('A','A',nb,nm,Ov,nb,sv,U,nb,VT,nm,wq,-1,rwork,info)
+            lwork = max(1, int(dble(wq(1))))
+            allocate(work(lwork))
+            call zgesvd('A','A',nb,nm,Ov,nb,sv,U,nb,VT,nm,work,lwork,rwork,info)
+            if (info /= 0) then
+               write(*,*) 'ERROR (ome_sp): SVD of the overlap with Xatu''s band states failed.'
+               stop 1
+            end if
+            blk = hk_ev(:,lo:hi)
+            hk_ev(:,cols) = matmul(blk, matmul(U(:,1:nm), VT))
+            if (nm < nb) then
+               hk_ev(:,ocols) = matmul(blk, U(:,nm+1:nb))
+               al_strad = .true.
+            end if
+            al_dev = max(al_dev, 1.0d0 - minval(sv))
+            deallocate(Ov, U, VT, sv, rwork, work, blk)
+         end if
+         lo = hi + 1
+      end do
+      deallocate(L)
+   end subroutine align_window_to_xatu
+
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    !> Phase of every band state: the convention of Xatu's band states (ExcitonTB::fixGlobalPhase, the sum of
-   !! the eigenvector's coefficients made real), so that the exciton envelopes, which are coefficients on Xatu's
-   !! states, refer to the same states here. With an overlap Xatu diagonalises the Lowdin Hamiltonian
+   !! the eigenvector's coefficients made real, or with band_phase_code = 2 the weighted sum of band_phase_sum),
+   !! so that the exciton envelopes, which are coefficients on Xatu's states, refer to the same states here. With an overlap Xatu diagonalises the Lowdin Hamiltonian
    !! S^{-1/2} H S^{-1/2} and fixes the phase of its eigenvectors S^{1/2} c, not of c; the two phases differ by
    !! an amount that depends on k and the band, which garbled every excitonic matrix element (MoSe2 SOC, 2v x 4c:
    !! excitonic absorbance 15% below Xatu's, 1.3e-3 with this convention). Single-particle results do not depend
@@ -1975,17 +2173,38 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
       sh = matmul(sh, conjg(transpose(u)))                   ! S^{1/2}, the Hermitian square root
       u = matmul(sh, hk_ev)                                  ! Lowdin coefficients of the band states
       do j = 1, norb
-         aux1 = sum(u(:,j))
+         aux1 = band_phase_sum(norb, u(:,j))
          hk_ev(:,j) = hk_ev(:,j)*exp(cmplx(0.0d0, -atan2(aimag(aux1), dble(aux1)), 8))
       end do
       deallocate(u, sh, work, w, rwork)
    end subroutine fix_band_phases
 
+   !> The quantity whose phase the band-phase rule removes: sum_i c_i (band_phase_code 1 and 3, Xatu's
+   !! ExcitonTB::fixGlobalPhase), or sum_i w_i c_i with w_i = exp(2 pi i g (i-1)), g = (sqrt(5) - 1)/2
+   !! (band_phase_code 2, Xatu builds whose fixGlobalPhase uses these incommensurate weights so that the sum
+   !! cannot vanish by accident for symmetric or antisymmetric orbital combinations).
+   complex*16 function band_phase_sum(n, c) result(t)
+      implicit none
+      integer, intent(in) :: n
+      complex*16, intent(in) :: c(n)
+      integer :: i
+      t = (0.0d0, 0.0d0)
+      if (band_phase_code == 2) then
+         do i = 1, n
+            t = t + phase_w(i)*c(i)
+         end do
+      else
+         do i = 1, n                      ! the loop phase_eigvec_nk always had: plain-sum runs stay bit-identical
+            t = t + c(i)
+         end do
+      end if
+   end function band_phase_sum
+
    subroutine phase_eigvec_nk(norb,hk_ev)
       implicit none
 
       integer norb
-      integer i,j,ii
+      integer j,ii
 
       dimension hk_ev(norb,norb)
 
@@ -1994,10 +2213,7 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
       do j=1,norb
-         aux1=0.0d0
-         do i=1,norb
-            aux1=aux1+hk_ev(i,j)
-         end do
+         aux1=band_phase_sum(norb,hk_ev(:,j))
          arg=atan2(aimag(aux1),realpart(aux1))
          factor=exp(complex(0.0d0,-arg))
          do ii=1,norb

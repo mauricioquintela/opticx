@@ -8,11 +8,11 @@ module ome_ex
   use parser_optics_xatu_dim, &
     only: npointstotal, vcell, &
           norb_ex, norb_ex_cut, nv_ex, nc_ex, nband_ex, nband_index, e_ex, fk_ex, fk_ex_basis_ok, &
-          fk_ex_loaded, load_fk_ex, &
+          fk_ex_loaded, load_fk_ex, band_phase_code, &
           get_ex_index_first, print_exciton_wf, &
           rkxvector, rkyvector, rkzvector
   use exciton_envelopes, &
-    only: fk_ex_der, get_fk_ex_der_k, get_kgrid_stencil
+    only: fk_ex_der, get_fk_ex_der_k, get_kgrid_stencil, get_xnm_directions, xnm_hex_mesh
   use ome_sp, &
     only: rotate_fk_ex_to_a4_basis, win_evec, win_sevec, win_xi2, win_ready, OMESP_TAG
   use scissor, only: scissor_on, scissor_ha, scissor_report, scissor_mesh_ex
@@ -1048,8 +1048,10 @@ contains
     complex(8), intent(in) :: berry_eigen_ex_band(npointstotal, 3, nband_ex, nband_ex)
 
     complex(8), allocatable :: G(:,:), accX(:,:), accV(:,:)
-    integer,    allocatable :: nbp(:,:), nbm(:,:)
-    real(8)    :: inv2h(3), dRkdK(3,3)
+    integer,    allocatable :: dirp(:,:), dirm(:,:)
+    real(8)    :: cfd(3,3)
+    integer    :: ndir
+    logical    :: hex
     integer    :: nj, ibz, ic, icp, iv, ivp, base, irow, icol
     real(8)    :: berry_shift
     complex(8), parameter :: ci    = (0.0d0, 1.0d0)
@@ -1060,8 +1062,9 @@ contains
     allocate(G(norb_ex, norb_ex_cut))
     allocate(accX(norb_ex_cut, norb_ex_cut), accV(norb_ex_cut, norb_ex_cut))
     if (xnm_covariant) then
-      allocate(nbp(3, npointstotal), nbm(3, npointstotal))
-      call get_kgrid_stencil(nbp, nbm, inv2h, dRkdK)
+      allocate(dirp(3, npointstotal), dirm(3, npointstotal))
+      call get_xnm_directions(ndir, dirp, dirm, cfd, hex)
+      if (hex) write(*,*) '   X_nm: covariant envelope derivative on the hexagonal star of mesh directions (C3-covariant)'
     end if
 
     do nj = 1, 3
@@ -1133,11 +1136,12 @@ contains
     end do
 
     deallocate(G, accX, accV)
-    if (allocated(nbp)) deallocate(nbp, nbm)
+    if (allocated(dirp)) deallocate(dirp, dirm)
 
   contains
 
-    !> G(block k,:) = i * sum_i dRkdK(i,nj) D_i f(k) + L(k) f(k), with the FOURTH-order transported
+    !> G(block k,:) = i * sum_j cfd(j,nj) D_j f(k) + L(k) f(k) over the mesh directions of get_xnm_directions (the crystal
+    !! axes, or the hexagonal star on a 2D hexagonal mesh), with the FOURTH-order transported
     !! central difference D_i f = [8 (T(k+b_i) - T(k-b_i)) - (T(k+2b_i) - T(k-2b_i))] / (12 h_i),
     !! T(k') = K(k,k') f(k'). Fourth order because the transported difference also discretises the
     !! connection (W = 1 - i b.xi^(1) + O(b^2)), which the finite_difference form takes analytically:
@@ -1157,6 +1161,17 @@ contains
     !! eigenvector phase jumps and arbitrary bases inside (near-)degenerate multiplets drop out. The
     !! finite_difference form needs a gauge that is smooth between neighbours; on MoS2 the phase-fixed
     !! gauge jumps by > 0.5 rad on 11.8% of the neighbour links (hBN: 0%).
+    !!
+    !! Non-orthonormal Wannier functions. With an overlap S(k) the window states are S-orthonormal and the full
+    !! connection is xi = i c^H S d c + c^H A c, with A(k) = r(k) + i dS/dk (akernel; = r(k)^H by the tight-binding
+    !! relation r(R) = r(-R)^H + R S(R)). The raw overlap W = (S(k) c(k))^H c(k') is not unitary when S depends on k:
+    !! to first order it is 1 + h c^H S dc, whose Hermitian part -(h/2) c^H dS c is a change of norm. In the
+    !! conduction term it combines with xi2 = c^H A c into exactly i c^H S dc + c^H A c. The valence index is
+    !! transported with conj(W_v), which flips the sign of that Hermitian part, so the valence term needs
+    !! c_v'^H A^H c_v = c_v'^H r(k) c_v instead: with c^H A c there it carried an extra -i c^H dS c. That error is
+    !! zero for orthonormal models and for an overlap without intercell terms (S independent of k): a
+    !! non-orthonormal rewrite of hBN with intercell mixing (same physics) had its excitonic SHG off by 56% at
+    !! 30x30 and 60x60 with non-interacting excitons; now 1.4e-3 and 9.5e-5, as for the orthonormal model.
     subroutine build_xcov()
       integer    :: kk, b, idim, sgn, kn, jc, jcp, jv, jvp, r, rp, istep
       complex(8) :: Wc(nc_ex,nc_ex), Wv(nv_ex,nv_ex), K(nbasis,nbasis), alpha
@@ -1164,7 +1179,7 @@ contains
       real(8), parameter :: wstep(2) = [4.0d0/3.0d0, -1.0d0/6.0d0]   ! x 1/(2h): (8 D1 - D2)/(12 h)
       !$omp parallel do default(none) schedule(dynamic) &
       !$omp   private(kk, b, idim, sgn, kn, jc, jcp, jv, jvp, r, rp, Wc, Wv, K, alpha, cf, istep) &
-      !$omp   shared(G, fk_ex, win_evec, win_sevec, win_xi2, nbp, nbm, inv2h, dRkdK, nj, nbasis, &
+      !$omp   shared(G, fk_ex, win_evec, win_sevec, win_xi2, dirp, dirm, cfd, ndir, nj, nbasis, &
       !$omp          npointstotal, nc_ex, nv_ex, norb_ex, norb_ex_cut)
       do kk = 1, npointstotal
         b = nbasis*(kk-1)
@@ -1177,26 +1192,27 @@ contains
               rp = (jcp-1)*nv_ex + jv
               K(r,rp) = K(r,rp) + win_xi2(kk, nj, nv_ex+jc, nv_ex+jcp)
             end do
+            ! valence: c_v'^H A(k)^H c_v, not c_v'^H A(k) c_v -- see the note on the overlap above build_xcov
             do jvp = 1, nv_ex
               rp = (jc-1)*nv_ex + jvp
-              K(r,rp) = K(r,rp) - win_xi2(kk, nj, jvp, jv)
+              K(r,rp) = K(r,rp) - conjg(win_xi2(kk, nj, jv, jvp))
             end do
           end do
         end do
         call zgemm('N','N', nbasis, norb_ex_cut, nbasis, cone, K, nbasis, fk_ex(b+1,1), norb_ex, &
                    czero, G(b+1,1), norb_ex)
         ! transported central differences along each active crystal direction
-        do idim = 1, 3
+        do idim = 1, ndir
          do istep = 1, 2
-          cf = dRkdK(idim, nj) * inv2h(idim) * wstep(istep)
+          cf = cfd(idim, nj) * wstep(istep)
           if (cf == 0.0d0) cycle
           do sgn = 1, -1, -2
             if (sgn == 1) then
-              kn = nbp(idim, kk)
-              if (istep == 2) kn = nbp(idim, kn)
+              kn = dirp(idim, kk)
+              if (istep == 2) kn = dirp(idim, kn)
             else
-              kn = nbm(idim, kk)
-              if (istep == 2) kn = nbm(idim, kn)
+              kn = dirm(idim, kk)
+              if (istep == 2) kn = dirm(idim, kn)
             end if
             do jcp = 1, nc_ex
               do jc = 1, nc_ex
@@ -1325,11 +1341,12 @@ contains
 ! answer rather than a slow one.
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-  !> Cache code for the X_nm method: 1 = finite_difference, 2 = covariant.
+  !> Cache code for the X_nm method: 1 = finite_difference, 2 = covariant (crystal-axis differences), 3 = covariant on
+  !! the hexagonal star of mesh directions (2D hexagonal meshes, get_xnm_directions).
   integer function xnm_method_code()
     implicit none
     if (xnm_covariant) then
-      xnm_method_code = 2
+      xnm_method_code = merge(3, 2, xnm_hex_mesh())
     else
       xnm_method_code = 1
     end if
@@ -1364,8 +1381,11 @@ contains
       return
     end if
 
-    ! v4 = v3 + the scissor record, written only with Scissor /= 0: a run without one writes exactly the v3 layout
+    ! v4 = v3 + the scissor record, written only with Scissor /= 0: a run without one writes exactly the v3 layout.
+    ! v5 = v4 with the scissor record always present + the band-phase record (band_phase_code), written only when the
+    ! band states are not made with the plain-sum rule: a plain-sum run writes exactly the v3/v4 layout.
     VERSION = merge(4, 3, scissor_on())
+    if (band_phase_code /= 1) VERSION = 5
     write(u) MAGIC, VERSION
     write(u) len_trim(material_name)
     write(u) trim(material_name)
@@ -1373,7 +1393,8 @@ contains
     write(u) nband_ex                                 ! v2: the band LIST, not just the counts --
     write(u) nband_index(1:nband_ex)                  ! nv/nc alone cannot tell [60,61] from [61,60]
     write(u) xnm_method_code()                        ! v3: how X_nm was built
-    if (VERSION == 4) write(u) scissor_ev, merge(1, 2, scissor_r_unchanged)   ! v4: eV, 1 r_ / 2 v_unchanged
+    if (VERSION >= 4) write(u) scissor_ev, merge(1, 2, scissor_r_unchanged)   ! v4: eV, 1 r_ / 2 v_unchanged
+    if (VERSION == 5) write(u) band_phase_code        ! v5: how the band states were made
     write(u) e_ex(1:norb_ex_cut)                      ! fingerprint of the Xatu solution
     write(u) xme_ex(1:3, 1:norb_ex_cut)
     write(u) vme_ex(1:3, 1:norb_ex_cut)
@@ -1417,7 +1438,7 @@ contains
     logical, intent(out) :: ok
     character(len=14), parameter :: MAGIC = 'OPTICX-OMEEX2 '
     real(8),           parameter :: ETOL = 1.0d-10
-    integer :: method_in, smode_in
+    integer :: method_in, smode_in, phase_in
     real(8) :: sciss_in
     character(len=256) :: fname
     character(len=14)  :: magic_in
@@ -1439,7 +1460,7 @@ contains
     if (ios /= 0) return
 
     read(u, iostat=ios) magic_in, ver
-    if (ios /= 0 .or. magic_in /= MAGIC .or. (ver /= 3 .and. ver /= 4)) then
+    if (ios /= 0 .or. magic_in /= MAGIC .or. (ver < 3 .or. ver > 5)) then
       if (ios == 0 .and. magic_in == MAGIC .and. ver == 1) then
         write(*,*) '   Cache '//trim(fname)//' is format version 1, which does NOT record the band'
         write(*,*) '        list and therefore cannot be checked for bands stored in a different'
@@ -1499,13 +1520,15 @@ contains
     if (method_in /= xnm_method_code()) then
       write(*,*) '   ERROR (read_ome_ex_second): '//trim(fname)//' was built with a DIFFERENT X_nm method.'
       write(*,'(A,I0,A,I0,A)') '          cached: ', method_in, '   wanted: ', xnm_method_code(), &
-           '   (1 = finite_difference, 2 = covariant; keyword Xnm_derivative)'
+           '   (1 = finite_difference, 2 = covariant, 3 = covariant on the hexagonal star; keyword Xnm_derivative)'
+      if (method_in == 2 .and. xnm_method_code() == 3) write(*,*) '          A covariant cache of a hexagonal mesh'// &
+           ' written before 2026-10-22 used the two-axis stencil, which breaks C3: recompute it.'
       write(*,*) '          Delete it or move it aside, or set Xnm_derivative to match.'
       close(u); stop 1
     end if
     ! v4: the scissor (X_n or P_n depend on it). A v3 file was written without one.
     sciss_in = 0.0d0; smode_in = merge(1, 2, scissor_r_unchanged)
-    if (ver == 4) then
+    if (ver >= 4) then
       read(u, iostat=ios) sciss_in, smode_in
       if (ios /= 0) then; close(u); return; end if
     end if
@@ -1516,6 +1539,20 @@ contains
       write(*,'(A,F10.5,A,A)') '          wanted: Scissor = ', scissor_ev, ' eV, ', &
            trim(merge('r_unchanged', 'v_unchanged', scissor_r_unchanged))
       write(*,*) '          The ground-state-to-exciton elements differ. Delete it or move it aside.'
+      close(u); stop 1
+    end if
+
+    ! v5: the band states the elements were built on. A v3/v4 file used the plain-sum phase rule.
+    phase_in = 1
+    if (ver == 5) then
+      read(u, iostat=ios) phase_in
+      if (ios /= 0) then; close(u); return; end if
+    end if
+    if (phase_in /= band_phase_code) then
+      write(*,*) '   ERROR (read_ome_ex_second): '//trim(fname)//' was built on DIFFERENT band states.'
+      write(*,'(A,I0,A,I0,A)') '          cached: ', phase_in, '   wanted: ', band_phase_code, &
+           '   (1 = plain-sum phase rule, 2 = weighted-sum rule, 3 = the Xatu archive''s band states)'
+      write(*,*) '          Its elements do not refer to the same states as the exciton envelopes. Delete it or move it aside.'
       close(u); stop 1
     end if
 

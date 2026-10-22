@@ -11,7 +11,7 @@
 # Compiler and flags
 # -----------------------------------------------------------------
 FC     = gfortran
-FFLAGS = -fopt-info-vec -g -O3 -ffree-line-length-none
+FFLAGS = -fopt-info-vec -g -fcheck=all -O3
 #FFLAGS = -O2-Wall  -g -fcheck=all 
 
 # -----------------------------------------------------------------
@@ -299,6 +299,19 @@ check_scissor: $(TARGET)
 # Non-orthonormal models: band phases as Xatu fixes them (on the Lowdin coefficients), the .omesp record, the guard.
 check_nonortho_phase: $(TARGET)
 	python3 tools/check_nonortho_phase.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_nonortho_phase
+
+# Band states of the exciton basis (needs a 'make HDF5=1' build and h5py): Xatu's stored states or the Band_phase rule,
+# convention independence, the .omesp and cache records, guards.
+check_band_phase: $(TARGET)
+	python3 tools/check_band_phase.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_band_phase
+
+# Non-orthonormal model with an intercell overlap: excitonic X_nm against a same-physics rewrite of hBN (needs HDF5=1, h5py).
+check_nonortho_xnm: $(TARGET)
+	python3 tools/check_nonortho_xnm.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_nonortho_xnm
+
+# X_nm on a hexagonal mesh: C3-covariant star stencil, cache record, non-hexagonal fallback (needs HDF5=1, h5py).
+check_hex_stencil: $(TARGET)
+	python3 tools/check_hex_stencil.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_hex_stencil
 
 # Xatu HDF5 archive input (needs a 'make HDF5=1' build and h5py): archive = text files, guards.
 # XATU=path/to/xatu (built with HDF5=1) adds a real Xatu run written both ways.

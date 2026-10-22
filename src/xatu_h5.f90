@@ -1,7 +1,9 @@
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! Reader of the Xatu exciton archive <label>.h5 written by 'xatu -H' (layout 'xatu-excitons', version 1).
 ! Reads only what opticx takes from the text .eigval/.states pair: the band window, the k mesh, the exciton
-! energies and the resonant envelopes A_vck(n) (dataset 'state' of each /excitons/<NNNN> group). Values are
+! energies and the resonant envelopes A_vck(n) (dataset 'state' of each /excitons/<NNNN> group).
+! Also the band states the envelopes refer to (/bands/eigenvectors, when Xatu stored them), so that opticx can
+! use exactly those states instead of rebuilding them with an assumed phase convention. Values are
 ! returned in the archive's units (eV, Angstrom^-1); the caller converts them exactly as for the text files.
 ! The archive stores them at full double precision, where the text files carry 7-8 significant digits.
 !
@@ -20,7 +22,7 @@ module xatu_h5
   implicit none
   private
 
-  public :: xatu_h5_info, xatu_h5_header, xatu_h5_energies, xatu_h5_kpoints, xatu_h5_states
+  public :: xatu_h5_info, xatu_h5_header, xatu_h5_energies, xatu_h5_kpoints, xatu_h5_states, xatu_h5_band_states
 
   type :: xatu_h5_info
     integer :: nk = 0            ! k points of the BSE mesh
@@ -212,6 +214,74 @@ subroutine xatu_h5_states(path, dim, n, fk)
   call h5tclose_f(ctype, err)
   call h5fclose_f(file, err)
 end subroutine xatu_h5_states
+
+!---------------------------------------------------------------------------------------------------------
+! Band states of the exciton basis: vec(:, b, ik) = /bands/eigenvectors[ik, b, :] (coefficients on the orbitals
+! of the model, in the Bloch gauge named by the attribute 'gauge'; with an overlap, the Lowdin coefficients
+! S^{1/2} c), band b being the absolute 0-based band idx(b) of /bands/indices. found = .false. when the archive
+! does not hold them (archives converted from text output). gauge = '' when the attribute is absent.
+!---------------------------------------------------------------------------------------------------------
+subroutine xatu_h5_band_states(path, norb, nk, found, idx, vec, gauge)
+  character(len=*), intent(in) :: path
+  integer, intent(in) :: norb, nk
+  logical, intent(out) :: found
+  integer, allocatable, intent(out) :: idx(:)
+  complex(8), allocatable, target, intent(out) :: vec(:,:,:)
+  character(len=:), allocatable, intent(out) :: gauge
+  integer(hid_t) :: file, ctype, dset, space
+  integer(hsize_t) :: npts
+  integer(int64), allocatable :: ibuf(:,:)
+  integer :: nb, err
+  integer(size_t) :: dsize
+  logical :: exists
+  type(c_ptr) :: buf
+
+  call open_archive(path, file)
+  gauge = ''
+  call h5aexists_f(file, 'gauge', exists, err)
+  if (err == 0 .and. exists) gauge = read_attr_string(file, 'gauge', path)
+  found = link_exists(file, 'bands/eigenvectors') .and. link_exists(file, 'bands/indices')
+  if (.not. found) then
+    call h5fclose_f(file, err)
+    return
+  end if
+
+  call h5dopen_f(file, 'bands/indices', dset, err)
+  call check(err, 'open dataset bands/indices', path)
+  call h5dget_space_f(dset, space, err)
+  call h5sget_simple_extent_npoints_f(space, npts, err)
+  call h5sclose_f(space, err)
+  call h5dclose_f(dset, err)
+  nb = int(npts)
+  allocate(ibuf(nb, 1))
+  call read_dataset_int64(file, 'bands/indices', path, ibuf)
+  idx = int(ibuf(:, 1))
+
+  allocate(vec(norb, nb, nk))
+  call h5dopen_f(file, 'bands/eigenvectors', dset, err)
+  call check(err, 'open dataset bands/eigenvectors', path)
+  call h5dget_space_f(dset, space, err)
+  call h5sget_simple_extent_npoints_f(space, npts, err)
+  call h5sclose_f(space, err)
+  if (npts /= int(norb, hsize_t)*nb*nk) then
+    write(*,'(a,i0,a,i0,a,i0,a,i0,a)') ' ERROR (xatu_h5): bands/eigenvectors has ', npts, ' values, expected nk*nbands*norb = ', &
+         nk, '*', nb, '*', norb, '. Was Xatu run with the same Wannier90 file?'
+    stop 1
+  end if
+  dsize = 8
+  call h5tcreate_f(H5T_COMPOUND_F, 2*dsize, ctype, err)
+  call check(err, 'create the complex type', path)
+  call h5tinsert_f(ctype, 'r', 0_size_t, H5T_NATIVE_DOUBLE, err)
+  call check(err, 'create the complex type', path)
+  call h5tinsert_f(ctype, 'i', dsize, H5T_NATIVE_DOUBLE, err)
+  call check(err, 'create the complex type', path)
+  buf = c_loc(vec)
+  call h5dread_f(dset, ctype, buf, err)
+  call check(err, 'read dataset bands/eigenvectors', path)
+  call h5tclose_f(ctype, err)
+  call h5dclose_f(dset, err)
+  call h5fclose_f(file, err)
+end subroutine xatu_h5_band_states
 
 !---------------------------------------------------------------------------------------------------------
 ! Helpers
@@ -473,6 +543,19 @@ subroutine xatu_h5_states(path, dim, n, fk)
   fk = (0.0d0, 0.0d0)
   call no_hdf5(path)
 end subroutine xatu_h5_states
+
+subroutine xatu_h5_band_states(path, norb, nk, found, idx, vec, gauge)
+  character(len=*), intent(in) :: path
+  integer, intent(in) :: norb, nk
+  logical, intent(out) :: found
+  integer, allocatable, intent(out) :: idx(:)
+  complex(8), allocatable, intent(out) :: vec(:,:,:)
+  character(len=:), allocatable, intent(out) :: gauge
+  found = .false.
+  gauge = ''
+  if (norb < 0 .or. nk < 0) allocate(idx(0), vec(0,0,0))
+  call no_hdf5(path)
+end subroutine xatu_h5_band_states
 
 subroutine no_hdf5(path)
   character(len=*), intent(in) :: path

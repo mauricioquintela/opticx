@@ -314,6 +314,92 @@ module exciton_envelopes
     where (h /= 0.0d0) inv2h = 1.0d0/(2.0d0*h)
   end subroutine get_kgrid_stencil
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  !> Difference directions of the covariant envelope derivative of X_nm (ome_ex build_xcov): the Cartesian gradient is
+  !! grad f = sum_j cfd(j,:) D_j f, with D_j f = (4/3)(T(k+s_j) - T(k-s_j)) - (1/6)(T(k+2s_j) - T(k-2s_j)) the transported
+  !! difference along mesh step s_j (fourth order; the 1/2 of a central difference is in cfd).
+  !!
+  !! Default: the crystal axes, cfd = dRkdK * 1/(2h). On a 2D HEXAGONAL mesh (equal steps 60 or 120 degrees apart) the
+  !! third star direction, s_3 = s_1 - s_2 (60 degrees) or s_1 + s_2 (120 degrees), is a mesh step too, and the gradient
+  !! is taken from all three with the least-squares weights (sum_j c_j c_j^T)^-1 c_j = 2 c_j / (3 |c|^2) (c_j the Cartesian
+  !! steps): the operator is then mapped onto itself by C3. The two-axis stencil is not, and for exciton envelopes that
+  !! the mesh resolves poorly (excited and near-gap excitons, a few mesh points wide) it makes X_nm anisotropic: MoSe2
+  !! with spin-orbit coupling, 87x87, lowest 2078 excitons, excitonic SHG C3 residual 38.6% with the axes, 1.7% with the
+  !! star; a 120x120 mesh does not cure it (30.6%), because the near-gap states only get narrower. In the non-interacting
+  !! limit the star is as accurate or slightly more (hBN 30x30, excitonic vs single-particle SHG 2.6e-3 -> 2.1e-3).
+  !! Mesh steps are compared to 1e-4 (the lattice of a _tb.dat file has about 6 significant figures).
+  subroutine get_xnm_directions(ndir, dirp, dirm, cfd, hex)
+    implicit none
+    integer, intent(out) :: ndir
+    integer, intent(out) :: dirp(3, npointstotal), dirm(3, npointstotal)
+    real(8), intent(out) :: cfd(3,3)
+    logical, intent(out) :: hex
+    integer, allocatable :: nbp(:,:), nbm(:,:)
+    real(8) :: inv2h(3), dRkdK(3,3), B(2,2), Bi(2,2), det, c(3,3), l1, l2, lm, lp
+    integer :: idim, d(3), ca(2), nca, j, k
+
+    allocate(nbp(3, npointstotal), nbm(3, npointstotal))
+    call get_kgrid_stencil(nbp, nbm, inv2h, dRkdK)
+    ndir = 0; cfd = 0.0d0; hex = .false.
+    do idim = 1, 3
+      if (inv2h(idim) == 0.0d0) cycle
+      ndir = ndir + 1; d(ndir) = idim
+      dirp(ndir,:) = nbp(idim,:); dirm(ndir,:) = nbm(idim,:)
+      cfd(ndir,:) = dRkdK(idim,:)*inv2h(idim)
+    end do
+    if (ndim /= 2 .or. ndir /= 2) return
+
+    ! Cartesian steps of the two mesh axes: in-plane block B (crystal d(i) vs periodic Cartesian axis ca(j)), c = h B^-1 e_d
+    nca = 0
+    if (active_x) then; nca = nca + 1; ca(nca) = 1; end if
+    if (active_y) then; nca = nca + 1; ca(nca) = 2; end if
+    if (active_z) then; nca = nca + 1; ca(nca) = 3; end if
+    if (nca /= 2) return
+    do j = 1, 2
+      do k = 1, 2
+        B(j,k) = dRkdK(d(j), ca(k))
+      end do
+    end do
+    det = B(1,1)*B(2,2) - B(1,2)*B(2,1)
+    if (det == 0.0d0) return
+    Bi = reshape([B(2,2), -B(2,1), -B(1,2), B(1,1)], [2,2])/det
+    c = 0.0d0
+    do j = 1, 2
+      c(ca, j) = Bi(:, j)/(2.0d0*inv2h(d(j)))
+    end do
+    l1 = norm2(c(:,1)); l2 = norm2(c(:,2)); lm = norm2(c(:,1) - c(:,2)); lp = norm2(c(:,1) + c(:,2))
+    if (abs(l1 - l2) > 1.0d-4*l1) return
+    if (abs(lm - l1) < 1.0d-4*l1) then
+      c(:,3) = c(:,1) - c(:,2)
+      do k = 1, npointstotal
+        dirp(3,k) = nbp(d(1), nbm(d(2), k)); dirm(3,k) = nbm(d(1), nbp(d(2), k))
+      end do
+    else if (abs(lp - l1) < 1.0d-4*l1) then
+      c(:,3) = c(:,1) + c(:,2)
+      do k = 1, npointstotal
+        dirp(3,k) = nbp(d(1), nbp(d(2), k)); dirm(3,k) = nbm(d(1), nbm(d(2), k))
+      end do
+    else
+      return
+    end if
+    ndir = 3; hex = .true.
+    do j = 1, 3
+      cfd(j,:) = 0.5d0*c(:,j)*2.0d0/(3.0d0*l1*l1)
+    end do
+    deallocate(nbp, nbm)
+  end subroutine get_xnm_directions
+
+  !> .true. when get_xnm_directions uses the hexagonal star (recorded in the excitonic cache).
+  logical function xnm_hex_mesh() result(hex)
+    implicit none
+    integer, allocatable :: dirp(:,:), dirm(:,:)
+    integer :: ndir
+    real(8) :: cfd(3,3)
+    allocate(dirp(3, npointstotal), dirm(3, npointstotal))
+    call get_xnm_directions(ndir, dirp, dirm, cfd, hex)
+    deallocate(dirp, dirm)
+  end function xnm_hex_mesh
+
 
 subroutine interp1(npointstotal, rk1v, rk2v, rk3v, fk_col, rk1, rk2, rk3, result)
   implicit none

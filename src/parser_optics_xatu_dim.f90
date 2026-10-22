@@ -10,8 +10,9 @@ module parser_optics_xatu_dim
       cache_ome_read,iflag_ome_ex_text,iflag_write_exk,second_order_response, & !for the fk_ex deferral, below
       response_text, & !Response = bands needs no valence/conduction split
       scissor_ev, & !checked against the Xatu archive
+      band_phase_weighted,band_phase_given,band_phase_text, & !band phases of the exciton basis
       read_line_numbers_int !subroutine
-  use xatu_h5, only: xatu_h5_info,xatu_h5_header,xatu_h5_energies,xatu_h5_kpoints,xatu_h5_states
+  use xatu_h5, only: xatu_h5_info,xatu_h5_header,xatu_h5_energies,xatu_h5_kpoints,xatu_h5_states,xatu_h5_band_states
   implicit none
 
   integer :: nv_ex,nc_ex
@@ -44,6 +45,18 @@ module parser_optics_xatu_dim
   ! what it costs today. Anything that consumes fk_ex must check this first.
   logical :: fk_ex_loaded = .false.
 
+  ! Phases of the band states the exciton envelopes are coefficients on. opticx rebuilds those states, so it must
+  ! reproduce Xatu's choice exactly (a k- and band-dependent phase mismatch scrambles every excitonic matrix
+  ! element: In2Se3 102x102, excitonic absorbance xx - yy 34% where C3 requires 0, 1.3% as in Xatu once matched).
+  !   1 = the sum of the coefficients made real (Band_phase = sum, default)
+  !   2 = sum_i w_i c_i made real, w_i = exp(2 pi i g (i-1)), g = (sqrt(5) - 1)/2 (Band_phase = weighted)
+  !   3 = the band states stored in the Xatu archive (/bands/eigenvectors), taken directly; Band_phase is ignored
+  ! Set here, used by ome_sp (which builds the states and records the code in the .omesp) and ome_ex (cache).
+  integer :: band_phase_code = 1
+  ! Xatu's band states of the exciton window when band_phase_code = 3: xatu_bvec(:, i, ik) for window band i
+  ! (the order of nband_index) at mesh point ik (Lowdin coefficients S^{1/2} c for a non-orthonormal model).
+  complex*16, allocatable :: xatu_bvec(:,:,:)
+
   dimension G(3,3)
 
   allocatable rkxvector(:)
@@ -64,6 +77,7 @@ subroutine get_optics_xatu_dim()
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   write(*,*) '3. Entering parser_optics_xatu_dim'
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  band_phase_code = merge(2, 1, band_phase_weighted)   ! 3 once an archive supplies Xatu's band states
 
   !Reminder:norb_ex_cut is given as input
   !get band and grid dimensions: from XATU-output or opticx-input
@@ -687,7 +701,13 @@ subroutine get_exciton_data()
   rkyvector=rkyvector*0.52917721067121d0 
   rkzvector=rkzvector*0.52917721067121d0 
 
-  if (iflag_xatu_h5) call check_h5_mesh()
+  if (iflag_xatu_h5) then
+    call check_h5_mesh()
+    call load_xatu_band_states()
+  else
+    write(*,'(a)') '    Band phases of the exciton basis: '//trim(merge('weighted sum real', 'sum real         ', &
+         band_phase_weighted))//' (Band_phase = '//trim(band_phase_text)//'; Xatu text output does not record it)'
+  end if
 
   ! The envelopes themselves are read here only if something is going to use them. A second-order OME
   ! cache read may make them unnecessary; in that case load_fk_ex() is called later, by get_ome_ex, if
@@ -719,6 +739,70 @@ subroutine get_exciton_data_h5()
   rkyvector = k(2,:)
   rkzvector = k(3,:)
 end subroutine get_exciton_data_h5
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Xatu's band states of the exciton window, from an archive that stores them (/bands/eigenvectors). The exciton
+! envelopes are coefficients on exactly these states, so ome_sp takes them over (band_phase_code = 3) instead of
+! rebuilding them with an assumed phase rule: Xatu builds differ in that rule (the plain sum of the coefficients
+! made real, or a weighted sum), and inside degenerate groups the basis is the eigensolver's choice. Archives
+! converted from text output do not store them; Band_phase then sets the rule.
+subroutine load_xatu_band_states()
+  implicit none
+  integer, allocatable :: idx(:)
+  complex*16, allocatable :: vec(:,:,:)
+  character(len=:), allocatable :: gauge
+  logical :: found
+  integer :: i, s, ik, j
+  real(8) :: ph_sum, ph_w, g
+  complex*16 :: w(norb)
+
+  call xatu_h5_band_states(trim(xatu_h5_filepath_in), norb, npointstotal, found, idx, vec, gauge)
+  if (.not. found) then
+    write(*,'(a)') '    The Xatu archive does not store its band states (converted from text output?): band phases'// &
+         ' rebuilt with Band_phase = '//trim(band_phase_text)
+    return
+  end if
+  if (len(gauge) > 0 .and. gauge /= 'lattice') then
+    write(*,*) 'ERROR (get_exciton_data): the Xatu archive stores its band states in the "'//gauge//'" Bloch gauge;'
+    write(*,*) '       opticx builds H(k) = sum_R exp(i k.R) H(R) (the lattice gauge). Rerun Xatu with the lattice gauge.'
+    stop 1
+  end if
+  allocate(xatu_bvec(norb, nband_ex, npointstotal))
+  do i = 1, nband_ex
+    s = findloc(idx + 1, nband_index(i), dim=1)
+    if (s == 0) then
+      write(*,'(a,i0,a)') ' ERROR (get_exciton_data): band ', nband_index(i), &
+           ' of the exciton window is not among the band states stored in the Xatu archive.'
+      stop 1
+    end if
+    xatu_bvec(:, i, :) = vec(:, s, :)
+  end do
+  deallocate(vec)
+  band_phase_code = 3
+
+  ! Which phase rule Xatu applied (for the log only: the states are used as they are)
+  g = 0.5d0*(sqrt(5.0d0) - 1.0d0)
+  do j = 1, norb
+    w(j) = exp(cmplx(0.0d0, 2.0d0*acos(-1.0d0)*g*dble(j - 1), 8))
+  end do
+  ph_sum = 0.0d0; ph_w = 0.0d0
+  do ik = 1, npointstotal
+    do i = 1, nband_ex
+      ph_sum = max(ph_sum, abs(atan2(aimag(sum(xatu_bvec(:,i,ik))), dble(sum(xatu_bvec(:,i,ik))))))
+      ph_w   = max(ph_w,   abs(atan2(aimag(sum(w*xatu_bvec(:,i,ik))), dble(sum(w*xatu_bvec(:,i,ik))))))
+    end do
+  end do
+  if (ph_sum < 1.0d-8) then
+    write(*,'(a)') '    Band states of the exciton window taken from the Xatu archive (phases: sum of the coefficients real)'
+  else if (ph_w < 1.0d-8) then
+    write(*,'(a)') '    Band states of the exciton window taken from the Xatu archive (phases: weighted sum of the'// &
+         ' coefficients real)'
+  else
+    write(*,'(a)') '    Band states of the exciton window taken from the Xatu archive (phases: no known rule)'
+  end if
+  if (band_phase_given) write(*,'(a)') '    NOTE: Band_phase = '//trim(band_phase_text)//' ignored: the archive'// &
+       ' stores the band states themselves.'
+end subroutine load_xatu_band_states
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! The archive's mesh must be the one opticx builds itself (get_grid, the same Monkhorst-Pack mesh in the

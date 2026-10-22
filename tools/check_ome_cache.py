@@ -116,7 +116,7 @@ def main():
         """'swap' reverses the cached band list (nv/nc unchanged: two bands stored in the wrong order);
         'v1' rewrites the file in the old format that carried no band list at all;
         'v2' rewrites it in the format that carried the band list but not the X_nm method;
-        'method' flips the recorded X_nm method (2 = covariant <-> 1 = finite_difference)."""
+        'method' flips the recorded X_nm method (covariant, 2 or 3 <-> 1 = finite_difference)."""
         b = bytearray(open(path, 'rb').read())
         ver, off, nband, method = hdr_offsets(b)
         assert ver == 3, f'expected cache format version 3, got {ver}'
@@ -126,7 +126,7 @@ def main():
             struct.pack_into(f'<{nband}i', b, off + 4, *idx[::-1])
             out = bytes(b)
         elif what == 'method':
-            struct.pack_into('<i', b, moff, 1 if method == 2 else 2)
+            struct.pack_into('<i', b, moff, 1 if method in (2, 3) else 2)
             out = bytes(b)
         elif what == 'v2':
             out = bytes(b[:14] + struct.pack('<i', 2) + b[18:moff] + b[moff + 4:])
@@ -241,7 +241,7 @@ def main():
     ver, _, nband, method = hdr_offsets(blob)
     check('bandlist   cache is format version 3', ver == 3, f'version {ver}')
     check('bandlist   header records the band count', nband == 2, f'nband_ex = {nband}')
-    check('method     header records the X_nm method (2 = covariant, the default)', method == 2,
+    check('method     header records the X_nm method (3 = covariant on the hexagonal star: hBN is hexagonal)', method == 3,
           f'method = {method}')
 
     # a REVERSED band list with identical nv/nc must STOP -- the swapped-band-order case exactly
