@@ -2,8 +2,8 @@
 """Scissor correction (keywords Scissor, eV, and Scissor_mode = r_unchanged | v_unchanged).
 
 A scissor shifts every conduction band rigidly, E_c -> E_c + Delta. r_unchanged keeps the interband position elements and
-rescales v_cv by (w_cv + Delta)/w_cv (Levine & Allan, PRL 63, 1719 (1989); Nastos et al., PRB 72, 045223 (2005));
-v_unchanged keeps v_cv and rescales r_cv by w_cv/(w_cv + Delta) (the convention of Xatu's Kubo conductivity).
+rescales v_cv by (w_cv + Delta)/w_cv (Levine & Allan, PRL 63, 1719 (1989); Nastos et al., PRB 72, 045223 (2005)), as
+Xatu's Kubo conductivity; v_unchanged keeps v_cv and rescales r_cv by w_cv/(w_cv + Delta).
 
 Checks (hBN, 30x30, a few seconds each):
   * Scissor = 0 gives the output of no Scissor keyword (to round-off) (shift and absorbance, single particle and excitonic).

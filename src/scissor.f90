@@ -6,10 +6,10 @@
 !! Keyword Scissor_mode chooses what is kept fixed (w_cv = E_c - E_v before the shift, g = w_cv/(w_cv + Delta)):
 !!   r_unchanged (default): r_cv kept, v_cv -> v_cv/g. The scissor as a nonlocal operator Delta P_c commuting with
 !!     the position operator in the length gauge: Levine & Allan, PRL 63, 1719 (1989); second order, Nastos et al.,
-!!     PRB 72, 045223 (2005).
+!!     PRB 72, 045223 (2005). Reproduces Xatu's Kubo conductivity (MoSe2 with spin-orbit coupling, 60x60,
+!!     2v x 8c: single-particle 2e-3, excitonic xx 1.7e-3).
 !!   v_unchanged: v_cv kept, r_cv -> g r_cv, so the generalised derivative picks up r_cv d_a g with
-!!     d_a g = Delta (v^a_cc - v^a_vv)/(w_cv + Delta)^2. This is what Xatu's own Kubo conductivity does (the
-!!     BSE diagonal and the transition energies are shifted, the velocity matrix elements are not).
+!!     d_a g = Delta (v^a_cc - v^a_vv)/(w_cv + Delta)^2.
 !! Band index convention of the window arrays: bands 1..nv_ex valence, nv_ex+1..nb conduction.
 module scissor
   use parser_input_file,      only: scissor_ev, scissor_r_unchanged

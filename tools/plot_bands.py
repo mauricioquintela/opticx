@@ -54,7 +54,7 @@ def main():
     ax.set_title(a.file.split('/')[-1] + ('   (Bandlist window in colour)' if window else ''), fontsize=9, loc='left')
     fig.tight_layout()
     out = a.out or a.file.rsplit('.', 1)[0] + '.png'
-    fig.savefig(out, dpi=130)
+    fig.savefig(out, dpi=300)
     print('plot written:', out)
 
 

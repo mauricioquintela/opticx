@@ -176,6 +176,15 @@ def main():
     # tolerance 1e-4, measured 3.5e-5: at the DC point method B's prefactor i w_2 = -2 eta multiplies terms of order 1/eta^2,
     # which amplifies the finite-difference rounding of both routes; both equal the real-time current (check_realtime_sign)
     e = rel(lsec(r2), lsec(r1)); check('hBN  rectification (covariant) equals Sp_method = per_band', e < 1e-4, f'{e:.2e} (tol 1e-4)')
+    # Response = rectification also writes the shift-vector diagnostic of the shift routes (same DC line, same grid)
+    sv = lambda d: np.loadtxt(os.path.join(d, 'shift_vector.dat'))
+    s0, _ = run('hBN_N30_shift_for_sv', hbn, '0 1', 1, 'shift', '6.5 12.5 0.15 60')
+    _, lg2 = run('hBN_N30_rect_sv_log', hbn, '0 1', 1, 'rectification', '6.5 12.5 0.15 4')
+    check('hBN  rectification log: shift vector written', 'written to shift_vector.dat' in lg2)
+    for lab, d in (('covariant', r2), ('per_band', r1)):
+        ok = os.path.exists(os.path.join(d, 'shift_vector.dat'))
+        e = rel(sv(d), sv(s0)) if ok else float('nan')
+        check(f'hBN  rectification ({lab}) writes the shift_vector.dat of Response = shift', ok and e < 1e-12, f'{e:.2e} (tol 1e-12)')
     MSEV = '0.8 2.4 0.025 641'
     m1, _ = run('MoS2_N30_shg', mos2, '-1 0 1 2', 26, 'shg', MSEV)
     G = lshg(m1); g = G[:, :2, :2, :2]; xg = g[:, 0, 0, 0]

@@ -13,7 +13,7 @@ module sigma_second_sp
   use ome_ex, &
   only:read_ome_sp_nonlinear !routine
   use ome_sp, only: cov_exact_tol, valley_ratio
-  use scissor, only: scissor_on, scissor_report, scissor_mesh_shift_cov, scissor_mesh_stencil
+  use scissor, only: scissor_on, scissor_ha, scissor_report, scissor_mesh_shift_cov, scissor_mesh_stencil
   implicit none
 
   contains
@@ -170,6 +170,8 @@ module sigma_second_sp
     else if (response_text == 'general') then
       call get_sigma_general_sp(npointstotal,nband_ex,vme_ex_band,ek,vme_der_pt_ex_band,'general')
     end if
+    ! the rectification is the same DC line as the shift current: write the shift-vector diagnostic too
+    if (response_text == 'rectification') call write_shift_vector_sp(npointstotal,nband_ex,ek,shift_vector_ex_band)
 
 
     deallocate(vme_abs_der_ex_band)
@@ -286,6 +288,70 @@ module sigma_second_sp
       !$OMP END PARALLEL
     end subroutine run_cov
   end subroutine get_sigma_second_cov_sp
+
+  !> shift_vector.dat for Response = rectification: the frequency-resolved shift vector
+  !!     sum_k sum_{n,m} (f_n - f_m) R^{a,b}_nm(k) delta(w - E_nm) / (N_k V),
+  !! R^{a,b}_nm of Eq. (10) of Esteve-Paredes et al., npj Comput. Mater. 11, 13 (2025), the same diagnostic, lineshape
+  !! (Broadening_type) and file layout as the shift routes write (get_shift_intens_cov), on the w_p grid of the
+  !! rectification. The rectification itself (method B) does not use it. With a Scissor the conduction energies are
+  !! shifted, as in the shift routes; R is unchanged in both Scissor modes (the positions keep their phases).
+  subroutine write_shift_vector_sp(npointstotal, nband_ex, ek, shift_vector_ex_band)
+  implicit none
+  integer, intent(in) :: npointstotal, nband_ex
+  real*8,  intent(in) :: ek(npointstotal, nband_ex)
+  real*8,  intent(in) :: shift_vector_ex_band(npointstotal, 3, 3, nband_ex, nband_ex)
+  real*8, allocatable :: wpg(:), wqg(:), svw(:,:,:), svw_t(:,:,:), dl(:)
+  real*8  :: eta2, x, sgn
+  integer :: nfreq, ibz, n, m, nj, njp, iw, iounit100
+
+  freq_ratio = -1.0d0; two_freq_grid = .false.
+  call build_freq_pairs(nfreq, wpg, wqg)
+  eta2 = eta/27.211385d0
+  allocate(svw(3,3,nfreq))
+  svw = 0.0d0
+  !$OMP PARALLEL DEFAULT(NONE) SHARED(npointstotal, nband_ex, nv_ex, ek, shift_vector_ex_band, nfreq, wpg, eta2, &
+  !$OMP                               vcell, broadening_type_text, svw) &
+  !$OMP   PRIVATE(ibz, n, m, nj, njp, x, sgn, dl, svw_t)
+  allocate(svw_t(3,3,nfreq), dl(nfreq))
+  svw_t = 0.0d0
+  !$OMP DO SCHEDULE(DYNAMIC)
+  do ibz = 1, npointstotal
+    do n = 1, nband_ex
+      do m = 1, nband_ex
+        if ((n <= nv_ex) .eqv. (m <= nv_ex)) cycle
+        x = ek(ibz,n) - ek(ibz,m)
+        if (scissor_on()) x = x + merge(-1.0d0, 1.0d0, n <= nv_ex)*scissor_ha()
+        if (trim(broadening_type_text) == 'gaussian') then
+          dl = 1.0d0/eta2/sqrt(2.0d0*pi)*exp(-0.5d0/(eta2**2)*(wpg - x)**2)
+        else
+          dl = 1.0d0/pi*aimag(1.0d0/(wpg - x - cmplx(0.0d0, eta2, 8)))
+        end if
+        sgn = merge(1.0d0, -1.0d0, n <= nv_ex)/(dble(npointstotal)*vcell)
+        do nj = 1, 3
+          do njp = 1, 3
+            svw_t(nj,njp,:) = svw_t(nj,njp,:) + sgn*shift_vector_ex_band(ibz,nj,njp,n,m)*dl
+          end do
+        end do
+      end do
+    end do
+  end do
+  !$OMP END DO
+  !$OMP CRITICAL
+  svw = svw + svw_t
+  !$OMP END CRITICAL
+  deallocate(svw_t, dl)
+  !$OMP END PARALLEL
+
+  open(newunit=iounit100, file='shift_vector.dat')
+  do iw = 1, nfreq
+    write(iounit100,*) wpg(iw)*27.211385d0, &
+      svw(1,1,iw), svw(1,2,iw), svw(1,3,iw), svw(2,1,iw), svw(2,2,iw), svw(2,3,iw), &
+      svw(3,1,iw), svw(3,2,iw), svw(3,3,iw)
+  end do
+  close(iounit100)
+  write(*,*) '    Shift vector (sp) written to shift_vector.dat'
+  deallocate(wpg, wqg, svw)
+  end subroutine write_shift_vector_sp
 
   ! the frequency grid of initialize_sigma_second_arrays, without touching any sigma array
   subroutine initialize_sigma_second_arrays_w(nw_, wp_)

@@ -95,8 +95,8 @@ module parser_input_file
   ! Scissor (eV): rigid shift of every conduction band, E_c -> E_c + Scissor, applied to the single-particle
   ! quantities at the response stage (the .omesp keeps the unshifted model). Scissor_mode chooses what stays fixed:
   ! r_unchanged (DEFAULT): interband position elements r_cv kept, velocities v_cv -> v_cv (w_cv + Scissor)/w_cv
-  ! (Levine & Allan, PRL 63, 1719 (1989); Nastos et al., PRB 72, 045223 (2005)); v_unchanged: velocities kept,
-  ! r_cv -> r_cv w_cv/(w_cv + Scissor) (the convention of Xatu's own Kubo conductivity).
+  ! (Levine & Allan, PRL 63, 1719 (1989); Nastos et al., PRB 72, 045223 (2005)), as Xatu's Kubo conductivity;
+  ! v_unchanged: velocities kept, r_cv -> r_cv w_cv/(w_cv + Scissor).
   real(8) :: scissor_ev = 0.0d0
   logical :: scissor_r_unchanged = .true.
   character(len=100) :: scissor_mode_text = 'r_unchanged'
