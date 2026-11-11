@@ -291,7 +291,9 @@ def main():
     blob = open(os.path.join(work, 'write', OMESP), 'rb').read()
     i = blob.find(struct.pack('<i', OMESP_TAG))
     flags = struct.unpack_from('<i', blob, i + 4)[0] if i >= 0 else -1
-    check('omesp      a shift run stores every block-covariant section (flags 15)', flags == 15, f'flags {flags}')
+    # bits 0-3: Eq. (A4) basis, window states, both block-covariant sets; bit 7: the window-correction products
+    check('omesp      a shift run stores the basis, both block-covariant sets and the window products (flags 143)',
+          flags == 143, f'flags {flags}')
     rc, log, dn = run2('none_shg', 'none', 'none', 'shg', 'read', files=(OMESP, CACHE))
     check('none_shg   OME_sp = none + OME_ex = none + read: runs, says it read the cache',
           rc == 0 and said_read(log), f'rc={rc}')

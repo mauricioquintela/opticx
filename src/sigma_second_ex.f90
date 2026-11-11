@@ -2,13 +2,13 @@ module sigma_second_ex
   use constants_math
   use parser_input_file, &
     only:e1,e2,eta,nw,response_text,broadening_type_text, &
-    freq_ratio,e1b,e2b,nwb,two_freq_grid,build_freq_pairs
+    freq_ratio,e1b,e2b,nwb,two_freq_grid,build_freq_pairs,window_correction
   use parser_wannier90_tb, &
     only:material_name
   use parser_optics_xatu_dim, &
     only:npointstotal,vcell,norb_ex_cut,nv_ex,nc_ex,nband_ex,e_ex,fk_ex
   use ome_ex, &
-    only:e_ex,xme_ex,vme_ex,xme_ex_inter,vme_ex_inter,inter_terms_ready
+    only:e_ex,xme_ex,vme_ex,xme_ex_inter,vme_ex_inter,inter_terms_ready,yme_ex,yme_ready
   use sigma_second_sp, &
     only:initialize_sigma_second_arrays
   implicit none
@@ -78,11 +78,27 @@ module sigma_second_ex
     
     call initialize_sigma_second_arrays(nw,wp,eta2,sigma_w_ex)
 	write(*,*) '    Evaluating shift conductivity (ex)...'
-    
+    ! The shift-current convention cancels term 3 of Eq. (B1a); with nv or nc > 1 that term holds, already
+    ! without interaction, the coherence part of the three-band transitions (SSH model: 153% of the route).
+    if (nv_ex > 1 .or. nc_ex > 1) then
+      write(*,'(A,I0,A,I0,A)') '     WARNING (shift): ', nv_ex, ' valence x ', nc_ex, &
+        ' conduction bands. The shift-current convention (npj Comput. Mater. 11, 13, SI Eqs. 9-11)'
+      write(*,'(A)') '     cancels term 3 of Eq. (B1a) of PRB 97, 205432, which with more than one valence or conduction', &
+        '     band holds, already without interaction, the coherence part of the three-band transitions of the', &
+        '     single-particle shift current. Response = rectification keeps it (the whole causal sigma(0; w, -w)).'
+    end if
+
     if (.not. inter_terms_ready) then
       write(*,*) 'ERROR (sigma_second_ex): xme_ex_inter/vme_ex_inter not '// &
                 'populated — get_ome_ex must be called with iflag_norder=2 first.'
       stop 1
+    end if
+    if (window_corr_on()) then
+      write(*,*) '    window correction applied: bands outside the exciton window as virtual states (Window_correction)'
+    else if (.not. window_correction) then
+      write(*,*) '    window correction off (Window_correction = false)'
+    else if (.not. yme_ready) then
+      write(*,*) '    window correction NOT applied: no window products for this run (see the WARNING above)'
     end if
     call get_shift_intens_ex_matrix(wp,eta2,sigma_w_ex)
     ! symmetrise over the field indices (b,c)
@@ -391,6 +407,31 @@ subroutine get_shift_intens_ex_matrix(wp, eta2, sigma_w_ex)
 
       end do
     end do
+
+    ! WINDOW CORRECTION: the commutator through the bands OUTSIDE the window, which the derivative on a field index
+    ! (X_nm) misses and Eq. (9) keeps: comm^{ac}_N = i (Y^{ac}_N - Y^{ca}_N) = sum f_N i sum_{l outside}
+    ! (r^a_vl r^c_lc - r^c_vl r^a_lc), entering as Eq. (9) does, conj(X^b_N) comm^{ac}_N at the resonance E_N (stored
+    ! at (a,b,c); the b<->c average below adds the other ordering). The outside bands thus enter as in the
+    ! single-particle shift current, coherences included: the shift-current convention drops term 3 inside the window
+    ! only. (Dropping it through the outside bands too, the convention's complete-basis value, subtracts 1/split
+    ! coherences wherever an outside band nears a window band: MoS2 2 x 2 of 34, 38 meV, 72% of the tensor.)
+    if (window_corr_on()) then
+      do njpp = 1, 3
+        do njp = 1, 3
+          do nj = 1, 3
+            Avec1(:) = conjg(xme_ex(njp,:))*ci*(yme_ex(nj,njpp,:) - yme_ex(njpp,nj,:))
+            if (mode == 1) then
+              term_total(1:nw_this) = matmul(Avec1, ci*pi*gauss2(:,1:nw_this))
+            else
+              term_total(1:nw_this) = matmul(Avec1, ci*aimag(Bfac2(:,1:nw_this)))
+            end if
+            ! sigma (a.u., kernel sign e = 1) = -2/(2 N V) sum ...: the writer's e^3 = -1 makes the file + comm
+            sigma_w_ex(nj,njp,njpp,iw0:iw1) = sigma_w_ex(nj,njp,njpp,iw0:iw1) &
+                - term_total(1:nw_this) / (dble(npointstotal)*vcell)
+          end do
+        end do
+      end do
+    end if
 
     ! =================================================================
     ! TERM 3: the zgemm depends only on (nj,njpp). Loop those outermost;
@@ -969,16 +1010,17 @@ end subroutine get_second_intens_ex_methodB
 !!                          eta = 0.1 eV). With P the non-interacting limit equals the single-particle
 !!                          rectification (least squares 1.000) and the result is mesh-converged at 75x75.
 !! @return void
-subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg, bare_term3)
+subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg, bare_term3, window_corr)
   implicit none
   integer,    intent(in)    :: nfreq
   complex(8), intent(in)    :: hwp(nfreq), hwq(nfreq), hw2(nfreq)
   complex(8), intent(inout) :: sigma_shg(3,3,3,nfreq)
-  logical,    intent(in), optional :: bare_term3
-  logical :: use_bare
+  logical,    intent(in), optional :: bare_term3, window_corr
+  logical :: use_bare, use_wc
+  complex(8), allocatable :: g1(:), g2(:)
 
   integer, parameter :: nw_chunk = 2000
-  integer :: nj, njp, njpp, nn, nnp
+  integer :: nj, njp, njpp, nn, nnp, idx_w
   integer :: iw0, iw1, nw_this, ichunk, nchunks
   complex(8), parameter :: ci=(0.0d0,1.0d0), czero=(0.0d0,0.0d0), cone=(1.0d0,0.0d0)
   complex(8), allocatable :: omega_c(:), omega2_c(:), omegap_c(:)
@@ -989,6 +1031,8 @@ subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg, bare_te
   prefA = -1.0d0/(dble(npointstotal)*vcell)      ! -C_ee, C_ee = 1 in these units (as in method B)
   use_bare = .false.
   if (present(bare_term3)) use_bare = bare_term3
+  use_wc = .false.
+  if (present(window_corr)) use_wc = window_corr .and. yme_ready
 
   allocate(omega_c(nw_chunk), omega2_c(nw_chunk), omegap_c(nw_chunk))
   allocate(Mmat(norb_ex_cut,norb_ex_cut))
@@ -1078,6 +1122,33 @@ subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg, bare_te
         end do
       end do
     end do
+
+    ! ---------------- WINDOW CORRECTION (window_corr) ----------------
+    ! The pieces of Eq. (B1a) with one exciton OUTSIDE the band window (taken without interaction), keeping only
+    ! the one-photon poles of the excitons in the window: in terms 1-2 the outside exciton is the current index n,
+    ! in term 3 either index, partial fractions keeping the inside pole. In the static limit of the outside
+    ! factors (w_2 -> 0, (E_n - E_m)/(hw2 + E_n - E_m) -> 1, Pi for the outside current; error O(2 eta/Delta E)
+    ! on the DC line) all of them reduce to Y^{ab}_m = sum_{n outside} X^a_n X^b_nm (yme_ex):
+    !   term 1: i Y^{ab}_m X*^c_m/(hw_q - E_m)     term 2: i Y*^{ab}_m X^c_m/(hw_q + E_m)
+    !   term 3 (a, b <- X*_m at hw_p, c <- X_m at hw_q): i Y^{ca}_m X*^b_m/(hw_p - E_m) + i X^c_m Y*^{ba}_m/(hw_q + E_m)
+    ! Non-interacting buckled SSH, 1 x 1 of 4 bands: equals the single-particle rectification to 0.7% (32% without).
+    if (use_wc) then
+      allocate(g1(norb_ex_cut), g2(norb_ex_cut))
+      do njpp = 1, 3
+        do njp = 1, 3
+          do nj = 1, 3
+            do idx_w = 1, nw_this
+              g1(:) = ci*yme_ex(nj,njp,:)*conjg(xme_ex(njpp,:))/(omega_c(idx_w) - e_ex(1:norb_ex_cut)) &
+                    + ci*conjg(yme_ex(nj,njp,:))*xme_ex(njpp,:)/(omega_c(idx_w) + e_ex(1:norb_ex_cut))
+              g2(:) = ci*yme_ex(njpp,nj,:)*conjg(xme_ex(njp,:))/(omegap_c(idx_w) - e_ex(1:norb_ex_cut)) &
+                    + ci*xme_ex(njpp,:)*conjg(yme_ex(njp,nj,:))/(omega_c(idx_w) + e_ex(1:norb_ex_cut))
+              sigma_shg(nj,njp,njpp,iw0+idx_w-1) = sigma_shg(nj,njp,njpp,iw0+idx_w-1) + prefA*(sum(g1) - sum(g2))
+            end do
+          end do
+        end do
+      end do
+      deallocate(g1, g2)
+    end if
   end do
 
   deallocate(omega_c, omega2_c, omegap_c, Mmat, Bmat, Wmat, Amat, term_total)
@@ -1124,10 +1195,12 @@ end subroutine get_shg_intens_ex_matrix_methodB
 ! of the rectification is 0.53 of the shift current, mesh-converged; the difference comes from pairs of
 ! distinct bound excitons, while in the continuum the two agree. In the non-interacting limit they agree
 ! only for ONE valence and ONE conduction band (hBN): with nv or nc > 1, term 3 couples non-interacting
-! excitons (v,c,k), (v',c,k) through v_vv' (or c, c'), i.e. the three-band virtual transitions that are part
-! of the independent-particle shift current, and the shift route drops them. Non-interacting In2Se3 30x30,
-! 4v x 1c, zzz: the shift route is 0.60-0.83 of the rectification, which equals the single-particle
-! rectification and a real-time propagation to 0.3% (eta = 0.15 eV); without term 3 the rectification
+! excitons (v,c,k), (v',c,k) through v_vv' (or c, c'). By partial fractions, 1/eps_c'c = eps_cv/(eps_c'v eps_c'c)
+! + 1/eps_c'v, the three-band pieces of the independent-particle shift current split into a coherence part (term 3)
+! and a transition part (terms 1-2): the shift route keeps the second and drops the first (SSH model, 2v x 2c,
+! 21x21: shift route = single-particle shift minus the coherence parts to 2.6e-3, though they differ by 153%).
+! Non-interacting In2Se3 30x30, 4v x 1c, zzz: the shift route is 0.60-0.83 of the rectification, which equals
+! the single-particle rectification and a real-time propagation to 0.3% (eta = 0.15 eV); without term 3 the rectification
 ! reproduces the shift route.
 !> Driver for the excitonic two-frequency response sigma^abc(w1+w2; w1, w2): builds the
 !! frequency pairs, picks method A or B, symmetrises and writes the result.
@@ -1180,8 +1253,20 @@ subroutine get_sigma_general_ex(tag)
     write(*,'(A,I0,A,I0,A)') '        ', nfreq, ' frequency pairs, ', norb_ex_cut, &
       ' excitons  [method A, Eq. (B1a), term 3 on the bare current: omega_2 = 0 is in range]'
     write(*,'(A)') '        causal prescription (every frequency + i*eta); Re = full DC response, Im = injection channel'
-    call get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigA, bare_term3=.true.)
-    call get_second_intens_ex_methodA(nfreq, hwq, hwp, hw2, sigB, bare_term3=.true.)
+    ! Window correction on the DC line only: its static limit needs w_2 = 2i eta; a 2D map varies w_2.
+    if (window_corr_on() .and. .not. two_freq_grid) then
+      write(*,'(A)') '        window correction applied: bands outside the exciton window as virtual states (Window_correction)'
+    else if (window_corr_on()) then
+      write(*,'(A)') '        window correction NOT applied: it is derived for the DC line, and this is a 2D map'
+    else if (.not. window_correction) then
+      write(*,'(A)') '        window correction off (Window_correction = false)'
+    else if (.not. yme_ready) then
+      write(*,'(A)') '        window correction NOT applied: no window products for this run (see the WARNING above)'
+    end if
+    call get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigA, bare_term3=.true., &
+                                      window_corr=window_corr_on() .and. .not. two_freq_grid)
+    call get_second_intens_ex_methodA(nfreq, hwq, hwp, hw2, sigB, bare_term3=.true., &
+                                      window_corr=window_corr_on() .and. .not. two_freq_grid)
   else
     write(*,'(A,I0,A,I0,A)') '        ', nfreq, ' frequency pairs, ', norb_ex_cut, &
                              ' excitons  [method B, Eq. (B1b)]'
@@ -1316,6 +1401,14 @@ end subroutine print_second_general_ex
 
   end subroutine print_shg_second_ex
 !!!!
+
+!> Is the window correction to be applied? Keyword Window_correction, and the products Y_n exist for this run.
+logical function window_corr_on()
+  implicit none
+  window_corr_on = window_correction .and. yme_ready
+  if (window_corr_on) window_corr_on = allocated(yme_ex)
+  if (window_corr_on) window_corr_on = any(yme_ex /= (0.0d0, 0.0d0))   ! zero when the window holds every band
+end function window_corr_on
 
 end module sigma_second_ex
 

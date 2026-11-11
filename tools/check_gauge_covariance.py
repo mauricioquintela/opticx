@@ -155,15 +155,17 @@ def main():
         print('\n  SKIP   degenerate-block checks: MoS2_N15.eigval/.states or the MoS2 tb file not found'
               f' (looked in {droot}). Generate with xatu --w90 26 <tb> exciton.config -ec -n 899 at ncells 15.')
     else:
-        def mrun(tag, repair, scramble, ncut=400):
+        def mrun(tag, repair, scramble, ncut=400, resp='shg', extra='', gauge=False):
             d = os.path.join(work, f'mos2_{tag}'); os.makedirs(d)
-            txt = IN.format(tb=mtb, eig=meig, sta=msta, resp='shg', method='covariant')
+            txt = IN.format(tb=mtb, eig=meig, sta=msta, resp=resp, method='covariant')
             txt = txt.replace('# Exciton_cutoff\n100', f'# Exciton_cutoff\n{ncut}').replace('# Nfermi\n1', '# Nfermi\n26')
             txt = txt.replace('4.6 7.6 0.05 120', '0.8 3.2 0.025 120').replace('# Cache_ome_ex\nwrite', '# Cache_ome_ex\noff')
-            open(os.path.join(d, 'in.txt'), 'w').write(txt + f'# Exciton_basis_repair\n{repair}\n')
+            open(os.path.join(d, 'in.txt'), 'w').write(txt + f'# Exciton_basis_repair\n{repair}\n' + extra)
             env = dict(os.environ); env.pop('OPTICX_GAUGE_TEST', None); env.pop('OPTICX_DEGEN_SCRAMBLE', None)
             if scramble:
                 env['OPTICX_DEGEN_SCRAMBLE'] = '1'
+            if gauge:
+                env['OPTICX_GAUGE_TEST'] = '1'
             r = subprocess.run([opticx, 'in.txt'], cwd=d, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             log = r.stdout.decode('utf-8', 'replace'); open(os.path.join(d, 'run.log'), 'w').write(log)
             for f in os.listdir(d):
@@ -199,6 +201,26 @@ def main():
                       and 'not converged' not in log.lower(), f'rc={rc}')
         e = rel(load(full[False], f), load(full[True], f))
         check('MoS2_N15 all 899 excitons: excitonic SHG unchanged by a different Xatu basis', e < 1e-9, f'{e:.2e} (tol 1e-9)')
+        # Window correction (2 x 2 of 34 bands): Y_n is contracted with the envelopes like X_n, so it must follow the
+        # same basis: unchanged by a different Xatu basis in degenerate blocks and by scrambled band phases.
+        for resp, f in (('rectification', 'second_ex_rectification_lengthgauge_MoS2_spin_wannier_07032024.dat'),
+                        ('shift', 'shift_ex_lengthgauge_MoS2_spin_wannier_07032024.dat')):
+            rc0, log0, d0 = mrun(f'wc_{resp}_0', 'true', False, resp=resp)
+            rc1, log1, d1 = mrun(f'wc_{resp}_1', 'true', True, resp=resp)
+            rcg, logg, dg = mrun(f'wc_{resp}_g', 'true', False, resp=resp, gauge=True)
+            rcf, logf, df = mrun(f'wc_{resp}_off', 'true', False, resp=resp, extra='# Window_correction\nfalse\n')
+            ok = rc0 == rc1 == rcg == rcf == 0 and 'window correction applied' in log0
+            check(f'MoS2_N15 window correction applied ({resp})', ok, f'rc={rc0},{rc1},{rcg},{rcf}')
+            if not ok:
+                continue
+            e = rel(load(d0, f), load(d1, f))
+            check(f'MoS2_N15 window-corrected excitonic {resp} unchanged by a different Xatu basis', e < 1e-9,
+                  f'{e:.2e} (tol 1e-9)')
+            e = rel(load(d0, f), load(dg, f))
+            check(f'MoS2_N15 window-corrected excitonic {resp} unchanged by scrambled band phases', e < 1e-9,
+                  f'{e:.2e} (tol 1e-9)')
+            e = rel(load(d0, f), load(df, f))
+            check(f'SENSITIVITY  the window correction moves the MoS2_N15 {resp}', e > 1e-3, f'{e:.2e} (must exceed 1e-3)')
 
     if nfail:
         print(f'\nFAILED: {nfail} check(s)'); sys.exit(1)

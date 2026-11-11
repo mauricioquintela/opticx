@@ -11,7 +11,7 @@
 # Compiler and flags
 # -----------------------------------------------------------------
 FC     = gfortran
-FFLAGS = -fopt-info-vec -g -fcheck=all -O3
+FFLAGS = -fopt-info-vec -g -fcheck=all -ffree-line-length-none -O3
 #FFLAGS = -O2-Wall  -g -fcheck=all 
 
 # -----------------------------------------------------------------
@@ -278,6 +278,15 @@ check_realtime_sign: $(TARGET)
 # Excitonic rectification, the whole causal sigma(0; w, -w): NI limit (Re and injection), reality, selection rule, NumPy
 check_ex_rectification: $(TARGET)
 	python3 tools/check_ex_rectification.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_ex_rectification
+
+# Excitonic shift route and rectification without interaction (SSH models): term 3 of Eq. B1a (2v x 2c), and the
+# bands outside the exciton window (buckled SSH 1v x 1c, Window_correction off and on)
+check_ex_shift_multiband: $(TARGET)
+	python3 tools/check_ex_shift_multiband.py --opticx $(TARGET) --workdir $(BINDIR)/check_ex_shift_multiband
+
+# Single-particle shift current vs the velocity sum rule of arXiv:2611.05990 (generalised; buckled hBN, MoS2)
+check_sumrule_shift: $(TARGET)
+	python3 tools/check_sumrule_shift.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_sumrule_shift
 
 # Out-of-plane components and the injection sign vs a real-time propagation (non-interacting buckled hBN)
 check_out_of_plane: $(TARGET)

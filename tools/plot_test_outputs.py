@@ -8,7 +8,7 @@ followed by numbers. This script reads such a file and saves a PNG next to it (o
 
     python3 tools/plot_test_outputs.py bin/test_run/shg_real_data_spectra.dat [out.png]
 
-kinds: shg_real_data, shift_real_data, shg_consistency, sp_shift, ex_rectification. Plotting is best-effort: a missing matplotlib only
+kinds: shg_real_data, shift_real_data, shg_consistency, sp_shift, ex_rectification, ex_shift_multiband. Plotting is best-effort: a missing matplotlib only
 prints a message (the Makefile calls this with a leading '-', so it never fails a test).
 """
 import sys
@@ -90,6 +90,33 @@ def plot(fn, out=None):
         for a in ax: a.set_xlabel(r'$\hbar\omega$ (eV)'); a.legend(fontsize=7)
         ax[0].set_ylabel(r'$\mu$A nm / V$^2$')
         fig.suptitle('Excitonic rectification, non-interacting buckled hBN 30x30, eta 0.05 eV (check_ex_rectification)')
+    elif kind == 'ex_shift_multiband':
+        fig, ax = plt.subplots(2, 3, figsize=(17, 7.6))
+        for a, c in zip(ax[0, :2], ('xxx', 'xyy')):
+            a.plot(D['E_eV'], D[c + '_sp_shift'], 'k-', lw=2, label='single-particle shift')
+            a.plot(D['E_eV'], D[c + '_ex_shift'], 'C0-', lw=1.6, label='excitonic shift route, NI')
+            a.plot(D['E_eV'], D[c + '_sp_shift_minus_coh'], 'C1--', lw=1.4, label='single-particle shift - coherence parts')
+            a.set_title(r'SSH 2v x 2c (whole model): shift $\sigma^{%s}$' % c)
+        a = ax[0, 2]
+        a.plot(D['E_eV'], D['xxx_sp_rect'], 'k-', lw=2, label='single-particle rectification')
+        a.plot(D['E_eV'], D['xxx_ex_rect'], 'C1--', lw=1.4, label='excitonic rectification, NI')
+        a.set_title(r'SSH 2v x 2c: Re sym $\sigma^{xxx}(0;\omega,-\omega)$')
+        for a, c in zip(ax[1, :2], ('xyy', 'zxx')):
+            a.plot(D['E_eV'], D[c + '_b_sp_shift'], 'k-', lw=2, label='single-particle shift')
+            a.plot(D['E_eV'], D[c + '_b_ex_shift_off'], 'C3:', lw=1.6, label='excitonic shift route, Window_correction = false')
+            a.plot(D['E_eV'], D[c + '_b_ex_shift'], 'C0-', lw=1.6, label='excitonic shift route (corrected)')
+            a.plot(D['E_eV'], D[c + '_b_sp_shift_minus_comm'], 'C1--', lw=1.2,
+                   label='single-particle shift - out-of-window commutator')
+            a.set_title(r'buckled SSH, window 1v x 1c of 4 bands: shift $\sigma^{%s}$' % c)
+        a = ax[1, 2]
+        a.plot(D['E_eV'], D['zxx_b_sp_rect'], 'k-', lw=2, label='single-particle rectification')
+        a.plot(D['E_eV'], D['zxx_b_ex_rect_off'], 'C3:', lw=1.6, label='excitonic, Window_correction = false')
+        a.plot(D['E_eV'], D['zxx_b_ex_rect'], 'C1--', lw=1.4, label='excitonic rectification (corrected)')
+        a.set_title(r'buckled SSH 1v x 1c: Re sym $\sigma^{zxx}(0;\omega,-\omega)$')
+        for a in ax.ravel(): a.set_xlabel(r'$\hbar\omega$ (eV)'); a.legend(fontsize=7); a.axhline(0, color='0.85', lw=0.5)
+        for a in ax[:, 0]: a.set_ylabel(r'$\mu$A nm / V$^2$')
+        fig.suptitle('Excitonic DC routes without interaction: term 3 (top) and the band-window correction (bottom), '
+                     'SSH model 21x21 (check_ex_shift_multiband)')
     else:
         print(f'plot_test_outputs: unknown kind {kind!r} in {fn}'); return None
     fig.tight_layout(); fig.savefig(out, dpi=110); plt.close(fig)

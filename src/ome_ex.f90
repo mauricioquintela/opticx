@@ -14,7 +14,7 @@ module ome_ex
   use exciton_envelopes, &
     only: fk_ex_der, get_fk_ex_der_k, get_kgrid_stencil, get_xnm_directions, xnm_hex_mesh
   use ome_sp, &
-    only: rotate_fk_ex_to_a4_basis, win_evec, win_sevec, win_xi2, win_ready, OMESP_TAG
+    only: rotate_fk_ex_to_a4_basis, win_evec, win_sevec, win_xi2, win_ready, OMESP_TAG, win_q, winq_ready
   use scissor, only: scissor_on, scissor_ha, scissor_report, scissor_mesh_ex
   use parser_input_file, only: scissor_ev, scissor_r_unchanged
   implicit none
@@ -31,6 +31,12 @@ module ome_ex
   ! 32.5 GiB of scratch replaced by 10.6 GiB.
   complex(8), allocatable :: xme_ex_inter(:,:,:)
   complex(8), allocatable :: vme_ex_inter(:,:,:)
+  ! Window correction (sigma_second_ex): yme_ex(a,b,n) = sum_kappa f_n(kappa) win_q(k,a,b,v,c), the remote part
+  ! <0| x^a Q x^b |n> of the position product through the bands outside the exciton window (Q its projector; the
+  ! outside excitons taken without interaction), contracted with the envelope as r_vc is for X_n. yme_ready says
+  ! whether it exists for this run (computed, or read from a cache that holds it).
+  complex(8), allocatable :: yme_ex(:,:,:)
+  logical, save :: yme_ready = .false.
 
 contains
 
@@ -74,6 +80,8 @@ contains
     ! and get_ome_gs_ex_sum_k now write into these thread-private buffers
     ! rather than module-level globals directly.
     complex(8), allocatable :: vme_ex_t(:,:), xme_ex_t(:,:)
+    complex(8), allocatable :: yme_ex_t(:,:,:)
+    logical :: do_y
     complex(8), allocatable :: vme_ex_k_t(:,:)
     complex(8), allocatable :: xme_ex_inter_t(:,:,:), vme_ex_inter_t(:,:,:)
     integer,    allocatable :: i_ex_table(:,:)
@@ -96,6 +104,7 @@ contains
     write(*,*) '6. Entering ome_ex'
     
     inter_terms_ready = .false.   ! ADD near the top
+    yme_ready = .false.
     
     ! PATCH: do_write_exk is now driven by the input-file flag
     ! (Write_ex_kresolved) rather than being hardcoded. Kept ANDed with
@@ -200,6 +209,11 @@ contains
     allocate(xme_ex(3, norb_ex_cut))
     vme_ex = (0.0d0, 0.0d0)
     xme_ex = (0.0d0, 0.0d0)
+    do_y = (iflag_norder == 2 .and. winq_ready)
+    if (allocated(yme_ex)) deallocate(yme_ex)
+    if (do_y) then
+      allocate(yme_ex(3, 3, norb_ex_cut)); yme_ex = (0.0d0, 0.0d0)
+    end if
 
     if (do_write_exk) then
       allocate(vme_ex_k(3, norb_ex_cut))
@@ -258,19 +272,22 @@ contains
     ! DEFAULT(NONE) added 2026-09-24 (audit): an unlisted variable would silently become SHARED,
     ! which is how a data race on the Wfull/Wblk_chk scratch arrays once reached production.
     !$omp parallel default(none) &
-    !$omp   private(ibz, ic, iv, vme_ex_t, xme_ex_t, vme_ex_k_t, i_ex_table)&
+    !$omp   private(ibz, ic, iv, vme_ex_t, xme_ex_t, vme_ex_k_t, i_ex_table, yme_ex_t)&
     ! read-only inputs:
     !$omp   shared(npointstotal, nbasis, norb_ex_cut, nv_ex, nc_ex, nband_ex, nf, iflag_norder) &
     !$omp   shared(rkxvector, rkyvector, rkzvector) &
     !$omp   shared(ek, vme_ex_band, xme_ex_band, berry_eigen_ex_band) &
     ! accumulators: every update below is inside the !$omp critical section:
-    !$omp   shared(vme_ex, xme_ex) &
+    !$omp   shared(vme_ex, xme_ex, yme_ex, do_y) &
     ! k-resolved output, written only at this thread's own ibz:
     !$omp   shared(u_exk, do_write_exk)&
     !$omp   shared(kmoment)
 
     allocate(vme_ex_t(3, norb_ex_cut)); vme_ex_t = (0.0d0, 0.0d0)
     allocate(xme_ex_t(3, norb_ex_cut)); xme_ex_t = (0.0d0, 0.0d0)
+    if (do_y) then
+      allocate(yme_ex_t(3, 3, norb_ex_cut)); yme_ex_t = (0.0d0, 0.0d0)
+    end if
     if (do_write_exk) then
       allocate(vme_ex_k_t(3, norb_ex_cut))
     end if
@@ -309,6 +326,7 @@ contains
 
       if (iflag_norder == 1 .or. iflag_norder == 2) &
         call get_ome_gs_ex_sum_k(ibz, i_ex_table, vme_ex_band, xme_ex_band, vme_ex_t, xme_ex_t)
+      if (do_y) call get_ome_gs_ex_y_k(ibz, i_ex_table, yme_ex_t)
 
       if (do_write_exk) then
         call get_ome_gs_ex_kresolved(ibz, i_ex_table, vme_ex_band, vme_ex_k_t)
@@ -328,9 +346,11 @@ contains
     !$omp critical
       vme_ex = vme_ex + vme_ex_t
       xme_ex = xme_ex + xme_ex_t
+      if (do_y) yme_ex = yme_ex + yme_ex_t
     !$omp end critical
 
     deallocate(vme_ex_t, xme_ex_t)
+    if (do_y) deallocate(yme_ex_t)
     if (do_write_exk) deallocate(vme_ex_k_t)
     deallocate(i_ex_table)
 
@@ -342,6 +362,14 @@ contains
       write(*,*) '   k-resolved linear excitonic OMEs written (omeexk)'
     end if
 
+    if (do_y) then
+      yme_ready = .true.
+      call report_window_correction()
+    else if (iflag_norder == 2) then
+      write(*,*) '   WARNING (ome_ex): the .omesp holds no products through the bands outside the exciton window'
+      write(*,*) '            (written by an earlier version): the excitonic DC response is computed without the window'
+      write(*,*) '            correction. Regenerate the .omesp with OME_sp = nonlinear.'
+    end if
     if (iflag_norder == 2) then
       ! The whole k-sum for the inter-exciton terms, as one zgemm per term per direction.
       call get_ome_inter_ex_batched(xme_ex_band, vme_ex_band, berry_eigen_ex_band, nbasis)
@@ -743,6 +771,35 @@ contains
       end do
     end do
   end subroutine get_ome_gs_ex_sum_k
+
+  !> Y_n at one k-point: the window products win_q contracted with the envelope, as r_vc is for X_n.
+  subroutine get_ome_gs_ex_y_k(ibz, i_ex_table, yme_ex_t)
+    implicit none
+    integer,    intent(in)    :: ibz
+    integer,    intent(in)    :: i_ex_table(nc_ex, nv_ex)
+    complex(8), intent(inout) :: yme_ex_t(3, 3, norb_ex_cut)
+    integer :: nn, ic, iv
+    do nn = 1, norb_ex_cut
+      do ic = 1, nc_ex
+        do iv = 1, nv_ex
+          yme_ex_t(:,:,nn) = yme_ex_t(:,:,nn) + fk_ex(i_ex_table(ic,iv),nn)*win_q(ibz,:,:,iv,ic)
+        end do
+      end do
+    end do
+  end subroutine get_ome_gs_ex_y_k
+
+  !> Log line for the window correction: its size, or that the window holds every band.
+  subroutine report_window_correction()
+    implicit none
+    real(8) :: ymax
+    ymax = maxval(abs(yme_ex))
+    if (ymax == 0.0d0) then
+      write(*,*) '   Window correction: none (the exciton window holds every band of the model)'
+    else
+      write(*,'(A,ES10.3,A)') '    Window correction: bands outside the exciton window as virtual states, max |Y_n| = ', &
+           ymax, ' bohr^2'
+    end if
+  end subroutine report_window_correction
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   ! PATCH: same fixes as get_ome_gs_ex_sum_k -- i_ex_table hoisted out
@@ -1372,6 +1429,7 @@ contains
   subroutine write_ome_ex_second()
     implicit none
     character(len=14), parameter :: MAGIC = 'OPTICX-OMEEX2 '
+    integer, parameter :: YTAG = 1497580887
     integer :: VERSION
     character(len=256) :: fname
     integer :: u, ios, m
@@ -1417,6 +1475,12 @@ contains
     do m = 1, norb_ex_cut
       write(u) vme_ex_inter(1:3, 1:norb_ex_cut, m)
     end do
+    ! Optional trailer (2026-11-10): YTAG and Y_n of the window correction. Older readers stop before it; a cache
+    ! without it is read as before, and the run then has no window correction.
+    if (yme_ready) then
+      write(u) YTAG
+      write(u) yme_ex(1:3, 1:3, 1:norb_ex_cut)
+    end if
     close(u)
     write(*,'(A,A,A,F8.2,A)') '   Second-order excitonic OMEs cached to ', trim(fname), ' (', &
          (6.0d0*dble(norb_ex_cut)**2 + 6.0d0*dble(norb_ex_cut))*16.0d0/1048576.0d0, ' MB)'
@@ -1451,6 +1515,9 @@ contains
     logical, intent(out) :: ok
     character(len=14), parameter :: MAGIC = 'OPTICX-OMEEX2 '
     real(8),           parameter :: ETOL = 1.0d-10
+    integer, parameter :: YTAG = 1497580887
+    integer :: ytag_in
+    complex(8), allocatable :: ybuf(:,:,:)
     integer :: method_in, smode_in, phase_in
     real(8) :: sciss_in
     character(len=256) :: fname
@@ -1629,6 +1696,27 @@ contains
       if (m <= norb_ex_cut) vme_ex_inter(:, :, m) = buf(:, 1:norb_ex_cut)
     end do
     deallocate(buf)
+
+    ! optional trailer: Y_n of the window correction
+    yme_ready = .false.
+    if (allocated(yme_ex)) deallocate(yme_ex)
+    read(u, iostat=ios) ytag_in
+    if (ios == 0 .and. ytag_in == YTAG) then
+      allocate(ybuf(3, 3, nex_in))
+      read(u, iostat=ios) ybuf
+      if (ios == 0) then
+        allocate(yme_ex(3, 3, norb_ex_cut))
+        yme_ex(:,:,:) = ybuf(:,:,1:norb_ex_cut)
+        yme_ready = .true.
+      end if
+      deallocate(ybuf)
+    end if
+    if (yme_ready) then
+      call report_window_correction()
+    else
+      write(*,*) '   WARNING (ome_ex): '//trim(fname)//' holds no window-correction data (written by an earlier version):'
+      write(*,*) '            the excitonic DC response is computed without it. Recompute the cache to include it.'
+    end if
 
     close(u)
     inter_terms_ready = .true.

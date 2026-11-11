@@ -136,10 +136,18 @@ module ome_sp
    complex*16, allocatable, save :: win_evec(:,:,:), win_sevec(:,:,:)
    complex*16, allocatable, save :: win_xi2(:,:,:,:)
    logical, save :: win_ready = .false.
+   ! Bands OUTSIDE the exciton window, for the window correction of the excitonic DC response (sigma_second_ex):
+   !   win_q(k,a,b,iv,ic) = sum_{l outside, conduction} r^a_{v l} r^b_{l c} - sum_{l outside, valence} r^b_{v l} r^a_{l c}
+   ! (v = window valence band iv, c = window conduction band ic, r_nl = -i v_nl/(E_n - E_l)), in the basis of
+   ! vme_ex_band, so that it is contracted with the envelopes exactly as r_vc is for X_n. Pairs closer than 1e-4 Ha
+   ! (the degeneracy window of the window r) are skipped and counted.
+   complex*16, allocatable, save :: win_q(:,:,:,:,:)
+   logical, save :: winq_ready = .false.
    ! Tagged tail of the nonlinear .omesp (format 2, 2026-10-06). After the per-k records and the two
    ! derivative arrays the file holds OMESP_TAG, a flags word and norb, then the optional sections in this
    ! order: a4_W (bit 0), the window states win_evec/win_sevec/win_xi2 (bit 1), the shift_covariant arrays
-   ! (bit 2), the covariant second-order arrays (bit 3); bit 4 (no section): the band phases follow Xatu's convention
+   ! (bit 2), the covariant second-order arrays (bit 3), the out-of-window products win_q (bit 7, last);
+   ! bit 4 (no section): the band phases follow Xatu's convention
    ! on the Lowdin coefficients S^{1/2} c (non-orthonormal models, fix_band_phases); bits 5 and 6 (no section): the
    ! weighted-sum phase rule, or the exciton-window states taken from the Xatu archive (states_phase_code 2, 3). Storing a4_W and the window states lets a run with
    ! OME_sp = none rebuild the basis the exciton envelopes must be carried into, which it otherwise cannot.
@@ -303,6 +311,9 @@ subroutine get_ome_sp(iflag_norder)
       ! and the number of k-points where a degenerate group crosses the window edge
       real(8) :: al_dev_max
       integer :: al_nstrad
+      ! window correction: is band l in the exciton window, and the band pairs skipped as degenerate
+      logical, allocatable :: inwin(:)
+      integer :: nqskip
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       write(*,*) '5. Entering ome_sp'
       block
@@ -396,6 +407,14 @@ subroutine get_ome_sp(iflag_norder)
          allocate(win_xi2(npointstotal,3,nband_ex,nband_ex))
          win_evec=(0.0d0,0.0d0); win_sevec=(0.0d0,0.0d0); win_xi2=(0.0d0,0.0d0)
       end if
+      winq_ready = .false.
+      if (allocated(win_q)) deallocate(win_q)
+      allocate(inwin(norb)); inwin = .false.
+      inwin(nband_index(1:nband_ex)) = .true.
+      nqskip = 0
+      if (iflag_norder.eq.2) then
+         allocate(win_q(npointstotal,3,3,nv_ex,nc_ex)); win_q = (0.0d0,0.0d0)
+      end if
       vme_abs_der_ex_band=0.0d0
       vme_der_pt_ex_band=0.0d0
       gen_der_ex_band=0.0d0
@@ -433,7 +452,7 @@ subroutine get_ome_sp(iflag_norder)
       ! outputs, written only at the disjoint index ibz owned by this thread:
       !$OMP   SHARED(ek,vme_ex_band,berry_eigen_ex_band,gen_der_ex_band), &
       !$OMP   SHARED(shift_vector_ex_band,vme_abs_der_ex_band,vme_der_pt_ex_band,a4_W), &
-      !$OMP   SHARED(win_evec,win_sevec,win_xi2), &
+      !$OMP   SHARED(win_evec,win_sevec,win_xi2,win_q,inwin,nv_ex,nc_ex) REDUCTION(+:nqskip), &
       ! double-checked flag: unguarded read is benign, the write is inside !$omp critical:
       !$OMP   SHARED(a4_W_straddle_warned)
 
@@ -592,6 +611,7 @@ subroutine get_ome_sp(iflag_norder)
                         end do
                   end do
             end do
+            if (iflag_norder.eq.2) call window_products(ibz, e, vme, nqskip)
       end do
       !$OMP END DO
       cur_ibz = 0
@@ -655,6 +675,11 @@ subroutine get_ome_sp(iflag_norder)
 
       a4_W_ready = .true.
       if (iflag_norder.eq.2) win_ready = .true.
+      if (iflag_norder.eq.2) then
+         winq_ready = .true.
+         if (nqskip > 0) write(*,'(a,i0,a)') '    WARNING (ome_sp): ', nqskip, ' (k, window band, outside band) combinations'// &
+              ' closer than 1e-4 Ha left out of the window correction: a degenerate group crosses the Bandlist edge.'
+      end if
       lowdin_phase_ready = .true.
       states_phase_code = band_phase_code
 
@@ -670,6 +695,46 @@ subroutine get_ome_sp(iflag_norder)
 
       deallocate(vme_ex_band,ek,berry_eigen_ex_band,gen_der_ex_band,shift_vector_ex_band,vme_abs_der_ex_band, &
                  vme_der_pt_ex_band)
+      deallocate(inwin)
+
+   contains
+
+      !> win_q at mesh point ibz from the energies and velocities of every band at that k (final basis): the products
+      !! through the bands outside the exciton window, valence v = nband_index(iv), conduction c = nband_index(nv_ex+ic).
+      !! e and vme are arguments, not host variables: inside the parallel region the thread's private copies are
+      !! not visible through host association.
+      subroutine window_products(ibz, e, vme, nskip)
+         integer,    intent(in)    :: ibz
+         real(8),    intent(in)    :: e(norb)
+         complex*16, intent(in)    :: vme(norb,norb,3)
+         integer,    intent(inout) :: nskip
+         integer :: iv, ic, l, a, b, v, c
+         complex*16 :: rvl(3), rlc(3)
+         do ic = 1, nc_ex
+            c = nband_index(nv_ex+ic)
+            do iv = 1, nv_ex
+               v = nband_index(iv)
+               do l = 1, norb
+                  if (inwin(l)) cycle
+                  if (abs(e(v)-e(l)) < 1.0d-4 .or. abs(e(l)-e(c)) < 1.0d-4) then
+                     nskip = nskip + 1
+                     cycle
+                  end if
+                  rvl(:) = -(0.0d0,1.0d0)*vme(v,l,:)/(e(v)-e(l))
+                  rlc(:) = -(0.0d0,1.0d0)*vme(l,c,:)/(e(l)-e(c))
+                  do b = 1, 3
+                     do a = 1, 3
+                        if (l > nf) then
+                           win_q(ibz,a,b,iv,ic) = win_q(ibz,a,b,iv,ic) + rvl(a)*rlc(b)
+                        else
+                           win_q(ibz,a,b,iv,ic) = win_q(ibz,a,b,iv,ic) - rvl(b)*rlc(a)
+                        end if
+                     end do
+                  end do
+               end do
+            end do
+         end do
+      end subroutine window_products
 end subroutine get_ome_sp
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
@@ -1369,6 +1434,7 @@ end subroutine get_berry_eigen_fourpoint
       if (.not. iflag_orthonormal) flags = ibset(flags, 4)      ! no section: band phases on S^{1/2} c
       if (states_phase_code == 2) flags = ibset(flags, 5)       ! no section: weighted-sum phase rule
       if (states_phase_code == 3) flags = ibset(flags, 6)       ! no section: window states = Xatu's stored states
+      if (allocated(win_q) .and. winq_ready) flags = ibset(flags, 7)
       write(iounit10) OMESP_TAG, flags, norb
       if (btest(flags, 0)) write(iounit10) a4_W
       if (btest(flags, 1)) then
@@ -1387,6 +1453,7 @@ end subroutine get_berry_eigen_fourpoint
          write(iounit10) cov_nb_e
          write(iounit10) cov_xi
       end if
+      if (btest(flags, 7)) write(iounit10) win_q
 
       close(iounit10)
    end subroutine write_ome_sp_nonlinear
@@ -1918,11 +1985,24 @@ subroutine get_vme_eigen_ome(norb,skernel,sderkernel,hkernel,hderkernel,akernel,
                if (ios == 0) read(u, iostat=ios) win_xi2
                win_ready = (ios == 0)
             end if
+            ! bit 7 (win_q) follows the sections of bits 0-3, whatever of them this run reads
+            if (btest(flags, 7)) then
+               pos = pos + 12
+               if (btest(flags, 0)) pos = pos + nk*nb*nb*16
+               if (btest(flags, 1)) pos = pos + 2*int(norb_r,8)*nb*nk*16 + nk*3*nb*nb*16
+               if (btest(flags, 2)) pos = pos + nk*9*nb*nb*16 + nk*3*nb*nb*16 + nk*nb*4
+               if (btest(flags, 3)) pos = pos + nk*6*nb*nb*16 + nk*21*nb*nb*16 + nk*7*nb*8 + nk*3*nb*nb*16
+               if (allocated(win_q)) deallocate(win_q)
+               allocate(win_q(npointstotal,3,3,nv_ex,nc_ex))
+               read(u, pos=pos, iostat=ios) win_q
+               winq_ready = (ios == 0)
+            end if
          end if
          close(u)
       end if
       if (a4_W_ready) write(*,*) '   Eq. (A4) basis of the exciton window read from '//trim(fname)
       if (win_ready)  write(*,*) '   Exciton-window states (covariant X_nm) read from '//trim(fname)
+      if (winq_ready) write(*,*) '   Products through the bands outside the exciton window read from '//trim(fname)
    end subroutine load_omesp_basis
 
    subroutine rotate_fk_ex_to_a4_basis()

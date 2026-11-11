@@ -15,7 +15,7 @@ module parser_input_file
   !                             2D (w_p, w_q) map and overrides Frequency_ratio.
   public :: freq_ratio, e1b, e2b, nwb, two_freq_grid
   public :: cache_ome_read, cache_ome_write
-  public :: xnm_covariant, basis_repair
+  public :: xnm_covariant, basis_repair, window_correction
   public :: sp_covariant
   public :: scissor_ev, scissor_r_unchanged, scissor_mode_text
   public :: band_phase_weighted, band_phase_given, band_phase_text
@@ -80,6 +80,13 @@ module parser_input_file
   ! the envelopes consistent with their covariantly transported neighbours (needs Xnm_derivative =
   ! covariant, second order). Keyword Exciton_basis_repair = true | false.
   logical :: basis_repair = .true.
+  ! Bands outside the exciton window as virtual states of the excitonic DC response (keyword Window_correction =
+  ! true | false). Restricted to the window, the position components do not commute, and the excitonic shift
+  ! route and the method-A rectification lose i sum_{l outside} (r^a_vl r^c_lc - r^c_vl r^a_lc), which Eq. (9) of
+  ! npj Comput. Mater. 11, 13 and the single-particle routes keep (buckled SSH model, 1 x 1 of 4 bands: 32%). The
+  ! correction adds those bands as non-interacting virtual intermediate states (see sigma_second_ex).
+  logical :: window_correction = .true.
+  character(len=100) :: window_correction_text = 'true'
   ! Ex_rectification: OBSOLETE. The excitonic rectification is always the whole causal sigma(0; w, -w); the
   ! shift current in the convention of npj Comput. Mater. 11, 13 is Response = shift. 'causal' is accepted
   ! with a note, 'shift' stops (it would otherwise silently return a different quantity).
@@ -368,6 +375,19 @@ module parser_input_file
               case default
                 write(*,*) 'ERROR (parser_input_file): Exciton_basis_repair = "'// &
                            trim(basis_repair_text)//'" is not recognised. Valid: true, false.'
+                stop 1
+            end select
+          else if (index(param_name, 'Window_correction') > 0) then
+            read(iounit10,'(A)') window_correction_text
+            window_correction_text = to_lower(adjustl(window_correction_text))
+            select case (trim(window_correction_text))
+              case ('true', '.true.', 'on', 'yes')
+                window_correction = .true.
+              case ('false', '.false.', 'off', 'no')
+                window_correction = .false.
+              case default
+                write(*,*) 'ERROR (parser_input_file): Window_correction = "'// &
+                           trim(window_correction_text)//'" is not recognised. Valid: true, false.'
                 stop 1
             end select
           else if (index(param_name, 'Xnm_derivative') > 0) then
