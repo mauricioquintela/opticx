@@ -27,8 +27,14 @@ components); 21x21, synthetic non-interacting Xatu text files on opticx's mesh. 
     on every component, out-of-plane ones included, while comm_out is O(1) of A.
  3. Same, default (the fix): B = A; C = D in Re (symmetric) and Im (antisymmetric, the injection current); the log
     says the correction was applied; no term-3 WARNING.
+    A 2D map with w_q of both signs (method A at every point): = the single-particle map, in both half-planes, and its
+    anti-diagonal = Response = rectification on the same grid.
+ 4. The window-edge WARNING: silent on the SSH models (bands >= 2.4 eV apart); MoS2 (repo model, needs --root) with the
+    window 0 1, which cuts the spin-degenerate pairs, warns that an outside band lies within 30 meV of a window band.
+ 5. The 2 eta report: logged on every run with outside bands (buckled SSH: 0% of the k-points, no WARNING); with an
+    eta of 1.5 eV (2 eta beyond the 2.4 eV distance to the outside bands) it exceeds a quarter of the mesh and warns.
 
-Usage: python3 tools/check_ex_shift_multiband.py --opticx bin/opticx --workdir bin/check_ex_shift_multiband
+Usage: python3 tools/check_ex_shift_multiband.py --opticx bin/opticx --root . --workdir bin/check_ex_shift_multiband
 """
 import argparse, os, subprocess, sys
 import numpy as np
@@ -81,6 +87,9 @@ nonlinear
 """
 WARN = 'WARNING (shift)'
 WC_ON = 'window correction applied'
+EDGE = 'lies within 30 meV of a window band'
+ETA_LINE = 'an outside band lies within 2 eta of a window band at'
+ETA_WARN = 'within 2 eta of the window at more than a quarter'
 
 
 def write_ni(M, val, con, prefix):
@@ -123,8 +132,9 @@ def window_comm(M, val, con, w, eta):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--opticx', required=True); ap.add_argument('--workdir', default='check_ex_shift_multiband')
+    ap.add_argument('--root', default='.')
     a = ap.parse_args()
-    work, opticx = os.path.abspath(a.workdir), os.path.abspath(a.opticx)
+    work, opticx, root = os.path.abspath(a.workdir), os.path.abspath(a.opticx), os.path.abspath(a.root)
     os.makedirs(work, exist_ok=True)
     nfail = 0
 
@@ -189,6 +199,12 @@ def main():
     dC0, _ = run('ex_rect_buck_1v1c_off', EX.format(tb=tbb, eig=eig1, sta=sta1, nf=NF, resp='rectification', ev=ev) + off)
     dB1, logB1 = run('ex_shift_buck_1v1c', EX.format(tb=tbb, eig=eig1, sta=sta1, nf=NF, resp='shift', ev=ev))
     dC1, logC1 = run('ex_rect_buck_1v1c', EX.format(tb=tbb, eig=eig1, sta=sta1, nf=NF, resp='rectification', ev=ev))
+    # 2D map with w_q of both signs: it contains w_1 + w_2 = 0 points, so method A evaluates all of it
+    evm, m2 = f'1 6 {eta_ev} 25', '# Energy_variables_2\n-5 5 50\n'
+    dMs, _ = run('sp_map_buck_1v1c', SP.format(tb=tbb, nc=NC, bl='0 1', nf=NF, resp='general', ev=evm) + m2)
+    dMe, logM = run('ex_map_buck_1v1c', EX.format(tb=tbb, eig=eig1, sta=sta1, nf=NF, resp='general', ev=evm) + m2)
+    dMo, _ = run('ex_map_buck_1v1c_off', EX.format(tb=tbb, eig=eig1, sta=sta1, nf=NF, resp='general', ev=evm) + m2 + off)
+    dMr, _ = run('ex_rect_buck_1v1c_mapgrid', EX.format(tb=tbb, eig=eig1, sta=sta1, nf=NF, resp='rectification', ev=evm))
     for f in (sta, sta1):
         os.remove(f)
     A1, D1, D1i = shift(dA1, False, matb), *rect(dD1, False, matb)
@@ -211,6 +227,39 @@ def main():
     e = rel(C1i, D1i); check('rectification, Im antisymmetric (injection) = single-particle', e < 1e-2, f'{e:.1e} (tol 1e-2)')
     check('log: window correction applied (shift and rectification)', WC_ON in logB1 and WC_ON in logC1)
     check('Response = shift does not warn (1v x 1c)', WARN not in logB1)
+
+    print('  2D map (w_p 1-6 eV, w_q -5..5 eV, method A):')
+    def gen(f):
+        a = np.loadtxt(f, comments='#'); return a[:, 0], a[:, 1], (a[:, 2::2] + 1j*a[:, 3::2]).reshape(-1, 3, 3, 3)
+    wpm, wqm, Ms = gen(os.path.join(dMs, f'second_general_lengthgauge_{matb}.dat'))
+    _, _, Me = gen(os.path.join(dMe, f'second_ex_general_lengthgauge_{matb}.dat'))
+    _, _, Mo = gen(os.path.join(dMo, f'second_ex_general_lengthgauge_{matb}.dat'))
+    wr, _, Rr = gen(os.path.join(dMr, f'second_ex_rectification_lengthgauge_{matb}.dat'))
+    pt = lambda Z: np.sqrt((np.abs(Z)**2).sum(axis=(1, 2, 3)))
+    e, e0 = pt(Me - Ms).sum()/pt(Ms).sum(), pt(Mo - Ms).sum()/pt(Ms).sum()
+    check('map = single-particle map (sum of per-point norms)', e < 1e-2, f'{e:.1e} (tol 1e-2; uncorrected {e0:.2f})')
+    for lab, sel in (('w_q < 0', wqm < -1e-9), ('w_q > 0', wqm > 1e-9)):
+        e = pt(Me[sel] - Ms[sel]).sum()/pt(Ms[sel]).sum(); check(f'    {lab}', e < 1e-2, f'{e:.1e} (tol 1e-2)')
+    dc = np.abs(wpm + wqm) < 1e-8
+    idx = [int(np.argmin(np.abs(wr - x))) for x in wpm[dc]]
+    e = np.abs(Me[dc] - Rr[idx]).max()/np.abs(Rr).max()
+    check('anti-diagonal = Response = rectification', dc.sum() > 10 and np.abs(wr[idx] - wpm[dc]).max() < 1e-9 and e < 1e-12,
+          f'{dc.sum()} points, {e:.1e} (tol 1e-12)')
+    check('log: window correction applied (map)', WC_ON in logM)
+
+    print('window-edge warning')
+    check('silent when the outside bands are far (buckled SSH)', EDGE not in logB1 and EDGE not in logC1)
+    m = [l for l in logB1.splitlines() if ETA_LINE in l]
+    check('2 eta report logged, 0% of the k-points, no WARNING (buckled SSH, eta 0.1)',
+          len(m) == 1 and ' 0.0%' in m[0] and ETA_WARN not in logB1, m[0].strip() if m else 'no line')
+    _, logw = run('sp_shift_buck_eta1p5', SP.format(tb=tbb, nc=NC, bl='0 1', nf=NF, resp='shift', ev=f'{e1} {e2} 1.5 {nw}'))
+    check('eta 1.5 eV (2 eta beyond the outside bands): warns', ETA_WARN in logw)
+    mos2 = os.path.join(root, 'MoS2_spin_wannier_07032024_tb.dat')
+    if not os.path.exists(mos2):
+        print(f'  SKIP   MoS2 window-edge check: {mos2} not found')
+    else:
+        _, logm = run('sp_shift_mos2_edge', SP.format(tb=mos2, nc=9, bl='0 1', nf=26, resp='shift', ev=ev))
+        check('MoS2, window 0 1 (cuts the spin-degenerate pairs): warns', EDGE in logm and 'Widen Bandlist' in logm)
 
     out = os.path.join(work, 'ex_shift_multiband_spectra.dat')
     cols = {'sp_shift': A, 'ex_shift': B, 'sp_shift_minus_coh': A - coh, 'ex_rect': C, 'sp_rect': D}

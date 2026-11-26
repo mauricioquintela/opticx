@@ -1432,6 +1432,7 @@ contains
     integer, parameter :: YTAG = 1497580887
     integer :: VERSION
     character(len=256) :: fname
+    character(len=24) :: size_txt
     integer :: u, ios, m
 
     if (.not. allocated(xme_ex) .or. .not. allocated(xme_ex_inter) .or. &
@@ -1482,8 +1483,9 @@ contains
       write(u) yme_ex(1:3, 1:3, 1:norb_ex_cut)
     end if
     close(u)
-    write(*,'(A,A,A,F8.2,A)') '   Second-order excitonic OMEs cached to ', trim(fname), ' (', &
-         (6.0d0*dble(norb_ex_cut)**2 + 6.0d0*dble(norb_ex_cut))*16.0d0/1048576.0d0, ' MB)'
+    ! F8.2 printed '********' from 100 GB on (production caches reach 400 GB)
+    write(size_txt,'(F24.2)') (6.0d0*dble(norb_ex_cut)**2 + 6.0d0*dble(norb_ex_cut))*16.0d0/1048576.0d0
+    write(*,'(A)') '   Second-order excitonic OMEs cached to '//trim(fname)//' ('//trim(adjustl(size_txt))//' MB)'
   end subroutine write_ome_ex_second
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

@@ -1,6 +1,6 @@
 module ome_sp
    use constants_math
-   use parser_input_file, only:iflag_orthonormal, response_text, sp_covariant, nf
+   use parser_input_file, only:iflag_orthonormal, response_text, sp_covariant, nf, eta
    use parser_wannier90_tb, &
       only:material_name,nR,nRvec,norb,R,shop,hhop,rhop_c
    use parser_optics_xatu_dim, &
@@ -314,6 +314,10 @@ subroutine get_ome_sp(iflag_norder)
       ! window correction: is band l in the exciton window, and the band pairs skipped as degenerate
       logical, allocatable :: inwin(:)
       integer :: nqskip
+      ! window correction: closest outside band to a window band (Ha) and k-points where it is within cov_tol
+      real(8) :: qdmin
+      integer :: nqclose, nqeta
+      real(8), allocatable :: qdk(:)      ! per k-point: closest outside band to a window band (Ha)
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       write(*,*) '5. Entering ome_sp'
       block
@@ -411,9 +415,10 @@ subroutine get_ome_sp(iflag_norder)
       if (allocated(win_q)) deallocate(win_q)
       allocate(inwin(norb)); inwin = .false.
       inwin(nband_index(1:nband_ex)) = .true.
-      nqskip = 0
+      nqskip = 0; qdmin = huge(1.0d0); nqclose = 0; nqeta = 0
       if (iflag_norder.eq.2) then
          allocate(win_q(npointstotal,3,3,nv_ex,nc_ex)); win_q = (0.0d0,0.0d0)
+         allocate(qdk(npointstotal)); qdk = huge(1.0d0)
       end if
       vme_abs_der_ex_band=0.0d0
       vme_der_pt_ex_band=0.0d0
@@ -452,7 +457,7 @@ subroutine get_ome_sp(iflag_norder)
       ! outputs, written only at the disjoint index ibz owned by this thread:
       !$OMP   SHARED(ek,vme_ex_band,berry_eigen_ex_band,gen_der_ex_band), &
       !$OMP   SHARED(shift_vector_ex_band,vme_abs_der_ex_band,vme_der_pt_ex_band,a4_W), &
-      !$OMP   SHARED(win_evec,win_sevec,win_xi2,win_q,inwin,nv_ex,nc_ex) REDUCTION(+:nqskip), &
+      !$OMP   SHARED(win_evec,win_sevec,win_xi2,win_q,inwin,nv_ex,nc_ex,qdk) REDUCTION(+:nqskip,nqclose) REDUCTION(min:qdmin), &
       ! double-checked flag: unguarded read is benign, the write is inside !$omp critical:
       !$OMP   SHARED(a4_W_straddle_warned)
 
@@ -611,7 +616,7 @@ subroutine get_ome_sp(iflag_norder)
                         end do
                   end do
             end do
-            if (iflag_norder.eq.2) call window_products(ibz, e, vme, nqskip)
+            if (iflag_norder.eq.2) call window_products(ibz, e, vme, nqskip, qdmin, nqclose, qdk(ibz))
       end do
       !$OMP END DO
       cur_ibz = 0
@@ -677,6 +682,34 @@ subroutine get_ome_sp(iflag_norder)
       if (iflag_norder.eq.2) win_ready = .true.
       if (iflag_norder.eq.2) then
          winq_ready = .true.
+         ! An outside band this close to a window band is a degenerate group cut by the window: the products grow as
+         ! 1/Delta E and the static limit of the rectification's correction fails (error ~ 2 eta/Delta E). Same tolerance
+         ! as the single-particle blocks (cov_tol), which warn in the same situation. Old SnTe model, window -2..3 (edge
+         ! within 30 meV at 24 k-points): the correction moved the non-interacting rectification away from the
+         ! single-particle one, 28% -> 33%.
+         ! The rectification's correction takes the static limit of the outside factors, error ~ 2 eta/Delta E: report how
+         ! often an outside band lies within 2 eta, warn above a quarter of the mesh. Measured, non-interacting, vs the
+         ! single-particle rectification: ReS2 4v x 2c 8% of the k-points at eta 0.02 (correction 49% -> 4%); In2Se3 4v x 1c
+         ! 6-17% (57% -> 6%); AFM CrSBr 2v x 4c 33-89% (the correction moved it away, 4% -> 6% and 6% -> 11% in weight).
+         ! Without time reversal the error lands in the symmetric real part, so magnetic models are the sensitive case.
+         nqeta = count(qdk < 2.0d0*eta/27.211385d0)
+         write(*,'(a,f6.1,a,f7.1,a,f6.1,a)') '    Window correction: an outside band lies within 2 eta of a window band at ', &
+              100.0d0*dble(nqeta)/dble(npointstotal), '% of the k-points (median distance ', &
+              27211.385d0*median_of(qdk), ' meV, 2 eta = ', 2000.0d0*eta, ' meV)'
+         if (dble(nqeta) > 0.25d0*dble(npointstotal)) then
+            write(*,'(a)') '    WARNING (ome_sp): the bands outside the exciton window are within 2 eta of the window at'// &
+                 ' more than a quarter of the k-points:'
+            write(*,'(a)') '             the window correction (static limit in the outside bands) is approximate. On models'// &
+                 ' without time reversal'
+            write(*,'(a)') '             (magnetic) it can then move the rectification away from the result; compare with'// &
+                 ' Window_correction = false.'
+         end if
+         deallocate(qdk)
+         if (nqclose > 0) then
+            write(*,'(a,i0,a,f7.1,a)') '    WARNING (ome_sp): at ', nqclose, ' k-points a band outside the exciton window lies'// &
+                 ' within 30 meV of a window band (closest ', qdmin*27211.385d0, ' meV):'
+            write(*,'(a)') '             the window correction is unreliable there. Widen Bandlist.'
+         end if
          if (nqskip > 0) write(*,'(a,i0,a)') '    WARNING (ome_sp): ', nqskip, ' (k, window band, outside band) combinations'// &
               ' closer than 1e-4 Ha left out of the window correction: a degenerate group crosses the Bandlist edge.'
       end if
@@ -703,19 +736,24 @@ subroutine get_ome_sp(iflag_norder)
       !! through the bands outside the exciton window, valence v = nband_index(iv), conduction c = nband_index(nv_ex+ic).
       !! e and vme are arguments, not host variables: inside the parallel region the thread's private copies are
       !! not visible through host association.
-      subroutine window_products(ibz, e, vme, nskip)
+      subroutine window_products(ibz, e, vme, nskip, dmin, nclose, dkout)
          integer,    intent(in)    :: ibz
          real(8),    intent(in)    :: e(norb)
          complex*16, intent(in)    :: vme(norb,norb,3)
-         integer,    intent(inout) :: nskip
+         integer,    intent(inout) :: nskip, nclose
+         real(8),    intent(inout) :: dmin
+         real(8),    intent(out)   :: dkout
          integer :: iv, ic, l, a, b, v, c
          complex*16 :: rvl(3), rlc(3)
+         real(8) :: dk
+         dk = huge(1.0d0)
          do ic = 1, nc_ex
             c = nband_index(nv_ex+ic)
             do iv = 1, nv_ex
                v = nband_index(iv)
                do l = 1, norb
                   if (inwin(l)) cycle
+                  dk = min(dk, abs(e(v)-e(l)), abs(e(l)-e(c)))
                   if (abs(e(v)-e(l)) < 1.0d-4 .or. abs(e(l)-e(c)) < 1.0d-4) then
                      nskip = nskip + 1
                      cycle
@@ -734,7 +772,27 @@ subroutine get_ome_sp(iflag_norder)
                end do
             end do
          end do
+         dmin = min(dmin, dk)
+         if (dk < cov_tol) nclose = nclose + 1
+         dkout = dk
       end subroutine window_products
+
+      !> Median of a real array, by bisection on the value (60 halvings of [min, max], O(size) each).
+      real(8) function median_of(x)
+         real(8), intent(in) :: x(:)
+         real(8) :: lo, hi, mid
+         integer :: it, half
+         lo = minval(x); hi = maxval(x); half = (size(x) + 1)/2
+         do it = 1, 60
+            mid = 0.5d0*(lo + hi)
+            if (count(x <= mid) >= half) then
+               hi = mid
+            else
+               lo = mid
+            end if
+         end do
+         median_of = hi
+      end function median_of
 end subroutine get_ome_sp
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 

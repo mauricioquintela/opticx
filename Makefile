@@ -282,7 +282,7 @@ check_ex_rectification: $(TARGET)
 # Excitonic shift route and rectification without interaction (SSH models): term 3 of Eq. B1a (2v x 2c), and the
 # bands outside the exciton window (buckled SSH 1v x 1c, Window_correction off and on)
 check_ex_shift_multiband: $(TARGET)
-	python3 tools/check_ex_shift_multiband.py --opticx $(TARGET) --workdir $(BINDIR)/check_ex_shift_multiband
+	python3 tools/check_ex_shift_multiband.py --opticx $(TARGET) --root $(CURDIR) --workdir $(BINDIR)/check_ex_shift_multiband
 
 # Single-particle shift current vs the velocity sum rule of arXiv:2611.05990 (generalised; buckled hBN, MoS2)
 check_sumrule_shift: $(TARGET)

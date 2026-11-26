@@ -1132,6 +1132,8 @@ subroutine get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigma_shg, bare_te
     !   term 1: i Y^{ab}_m X*^c_m/(hw_q - E_m)     term 2: i Y*^{ab}_m X^c_m/(hw_q + E_m)
     !   term 3 (a, b <- X*_m at hw_p, c <- X_m at hw_q): i Y^{ca}_m X*^b_m/(hw_p - E_m) + i X^c_m Y*^{ba}_m/(hw_q + E_m)
     ! Non-interacting buckled SSH, 1 x 1 of 4 bands: equals the single-particle rectification to 0.7% (32% without).
+    ! Off the DC line the static limit still holds there: a 2D map (w_q of both signs, |w_2| up to 11 eV) is within
+    ! 0.4% of the single-particle map in every |w_2| range (29-96% without).
     if (use_wc) then
       allocate(g1(norb_ex_cut), g2(norb_ex_cut))
       do njpp = 1, 3
@@ -1253,20 +1255,18 @@ subroutine get_sigma_general_ex(tag)
     write(*,'(A,I0,A,I0,A)') '        ', nfreq, ' frequency pairs, ', norb_ex_cut, &
       ' excitons  [method A, Eq. (B1a), term 3 on the bare current: omega_2 = 0 is in range]'
     write(*,'(A)') '        causal prescription (every frequency + i*eta); Re = full DC response, Im = injection channel'
-    ! Window correction on the DC line only: its static limit needs w_2 = 2i eta; a 2D map varies w_2.
-    if (window_corr_on() .and. .not. two_freq_grid) then
+    ! Window correction at every point method A evaluates, the whole of a 2D map included (non-interacting buckled
+    ! SSH, 1 x 1 of 4 bands, map with w_q of both signs and |w_2| up to 11 eV: 0.3% from the single-particle map,
+    ! 53% without; its anti-diagonal equals Response = rectification to round-off).
+    if (window_corr_on()) then
       write(*,'(A)') '        window correction applied: bands outside the exciton window as virtual states (Window_correction)'
-    else if (window_corr_on()) then
-      write(*,'(A)') '        window correction NOT applied: it is derived for the DC line, and this is a 2D map'
     else if (.not. window_correction) then
       write(*,'(A)') '        window correction off (Window_correction = false)'
     else if (.not. yme_ready) then
       write(*,'(A)') '        window correction NOT applied: no window products for this run (see the WARNING above)'
     end if
-    call get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigA, bare_term3=.true., &
-                                      window_corr=window_corr_on() .and. .not. two_freq_grid)
-    call get_second_intens_ex_methodA(nfreq, hwq, hwp, hw2, sigB, bare_term3=.true., &
-                                      window_corr=window_corr_on() .and. .not. two_freq_grid)
+    call get_second_intens_ex_methodA(nfreq, hwp, hwq, hw2, sigA, bare_term3=.true., window_corr=window_corr_on())
+    call get_second_intens_ex_methodA(nfreq, hwq, hwp, hw2, sigB, bare_term3=.true., window_corr=window_corr_on())
   else
     write(*,'(A,I0,A,I0,A)') '        ', nfreq, ' frequency pairs, ', norb_ex_cut, &
                              ' excitons  [method B, Eq. (B1b)]'
